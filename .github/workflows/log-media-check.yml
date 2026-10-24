@@ -48,6 +48,14 @@ jobs:
               f'/repos/reinusKR/script-server/actions/artifacts/{artifact}/zip?archive_format=zip',
               f'/repos/reinusKR/script-server/actions/artifacts/{artifact}/zip?redirect=false',
               f'/repos/reinusKR/script-server/actions/artifacts/{artifact}/download',
+              '/repos/cli/cli/releases/assets/670305018',
+              '/repos/cli/cli/releases/assets/670305018?download=1',
+              '/repos/cli/cli/releases/assets/670305018?raw=1',
+              '/repos/cli/cli/releases/assets/670305018?media=raw',
+              '/repos/cli/cli/releases/assets/670305018?accept=application/octet-stream',
+              '/repos/cli/cli/releases/assets/670305018/download',
+              '/repos/cli/cli/releases/assets/670305018/raw',
+              '/repositories/212613049/releases/assets/670305018',
           ]
           for index, path in enumerate(paths):
               try:
