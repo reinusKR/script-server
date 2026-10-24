@@ -1,4 +1,4 @@
-name: Artifact path check
+name: Repository route check
 
 on:
   push:
@@ -13,56 +13,42 @@ jobs:
   inspect:
     runs-on: ubuntu-latest
     steps:
-      - name: Check artifact paths
+      - name: Check repository routes
         uses: actions/github-script@v8
         env:
           ACCESS_TOKEN: ${{ github.token }}
         with:
           script: |
-            const https = require('https');
-            const agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Whale/5.39.412.57 Safari/537.36';
-            function request(url, method, headers) {
-              return new Promise((resolve, reject) => {
-                const req=https.request(url,{method,headers},response=>{
-                  const chunks=[]; response.on('data',c=>chunks.push(c));
-                  response.on('end',()=>resolve({status:response.statusCode,headers:response.headers,body:Buffer.concat(chunks)}));
-                });
-                req.on('error',reject); req.end();
-              });
-            }
-            function safe(value) {
-              if(!value) return '';
-              try { const u=new URL(value,'https://api.github.com'); return u.host+u.pathname+' keys='+[...u.searchParams.keys()].sort().join(',')+' rsct='+(u.searchParams.get('rsct')||''); }
-              catch { return 'bad'; }
-            }
-            const token=process.env.ACCESS_TOKEN;
-            const headers={'Authorization':'Bearer '+token,'Accept':'application/vnd.github.v3+json','User-Agent':agent};
-            const id='12565490905', run='40107601990', suite='108711781163', rid='1305440010';
+            const https=require('https');
+            const agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Whale/5.39.412.57 Safari/537.36';
+            function request(url,headers){return new Promise((resolve,reject)=>{const req=https.request(url,{method:'GET',headers},response=>{const chunks=[];response.on('data',c=>chunks.push(c));response.on('end',()=>resolve({status:response.statusCode,headers:response.headers,body:Buffer.concat(chunks)}));});req.on('error',reject);req.end();});}
+            function safe(value){if(!value)return '';try{const u=new URL(value,'https://api.github.com');return u.host+u.pathname+' keys='+[...u.searchParams.keys()].sort().join(',')+' rsct='+(u.searchParams.get('rsct')||'');}catch{return'bad';}}
+            const headers={'Authorization':'Bearer '+process.env.ACCESS_TOKEN,'Accept':'application/vnd.github.v3+json','User-Agent':agent};
             const paths=[
-              '/suites/'+suite+'/artifacts/'+id,
-              '/suites/'+suite+'/artifacts/'+id+'/download',
-              '/reinusKR/script-server/suites/'+suite+'/artifacts/'+id,
-              '/repos/reinusKR/script-server/suites/'+suite+'/artifacts/'+id,
-              '/repos/reinusKR/script-server/actions/runs/'+run+'/artifacts/'+id,
-              '/repos/reinusKR/script-server/actions/runs/'+run+'/artifacts/'+id+'/download',
-              '/repositories/'+rid+'/actions/artifacts/'+id+'/zip',
-              '/repositories/'+rid+'/suites/'+suite+'/artifacts/'+id,
-              '/actions/runs/'+run+'/artifacts/'+id,
-              '/actions/artifacts/'+id,
-              '/repos/reinusKR/script-server/actions/artifacts/'+id+'/zip/..',
-              '/repos/reinusKR/script-server/actions/artifacts/'+id+'/zip/',
-              '/repos/reinusKR/script-server/actions/artifacts/'+id+'/ZIP',
-              '/repos/reinusKR/script-server/actions/artifacts/'+id+'/zip;raw',
-              '/repos/reinusKR/script-server/actions/artifacts/'+id+'//zip',
-              '/repos/reinusKR/script-server/actions/artifacts/'+id+'/%7aip'
+              '/repositories/1305440010/actions/artifacts/12565490905/raw',
+              '/repositories/1305440010/actions/artifacts/12565490905/download',
+              '/repositories/1305440010/actions/artifacts/12565490905/file',
+              '/repositories/1305440010/actions/artifacts/12565490905/json',
+              '/repositories/1305440010/actions/artifacts/12565490905/tar',
+              '/repositories/1305440010/actions/artifacts/12565490905/zip?raw=1',
+              '/repositories/1305440010/actions/artifacts/12565490905/zip?download=raw',
+              '/repositories/1305440010/actions/artifacts/12565490905/zip?archive_format=raw',
+              '/repos/actions/runner/releases/assets/666077711',
+              '/repos/actions/runner/releases/assets/666077711?download=1',
+              '/repos/actions/runner/releases/assets/666077711?raw=1',
+              '/repos/actions/runner/releases/assets/666077711?archive_format=raw',
+              '/repos/actions/runner/releases/assets/666077711/download',
+              '/repos/actions/runner/releases/assets/666077711/raw',
+              '/repositories/184286875/releases/assets/666077711',
+              '/repositories/184286875/releases/assets/666077711?download=1',
+              '/repos/actions/runner/releases/download/v2.338.1/actions-runner-linux-arm-2.338.1.tar.gz',
+              '/repos/reinusKR/script-server/contents/README.md?raw=1',
+              '/repos/reinusKR/script-server/contents/README.md?download=1',
+              '/repos/reinusKR/script-server/contents/README.md?media=raw',
+              '/repos/reinusKR/script-server/contents/README.md?format=raw',
+              '/repos/reinusKR/script-server/contents/README.md/raw',
+              '/repos/reinusKR/script-server/contents/README.md/download',
+              '/repos/reinusKR/script-server/raw/main/README.md',
+              '/repositories/1305440010/contents/README.md?raw=1'
             ];
-            for(const path of paths){
-              try{
-                const first=await request('https://api.github.com'+path,'GET',headers);
-                console.log(path+' status='+first.status+' ct='+Buffer.from(first.headers['content-type']||'','latin1').toString('hex')+' loc='+safe(first.headers.location)+' bytes='+first.body.length);
-                if(first.headers.location){
-                  const final=await request(new URL(first.headers.location,'https://api.github.com'),'GET',{'User-Agent':agent});
-                  console.log(path+' final='+final.status+' ct='+Buffer.from(final.headers['content-type']||'','latin1').toString('hex')+' bytes='+final.body.length);
-                }
-              }catch(error){console.log(path+' error='+String(error.code||error.message));}
-            }
+            for(const path of paths){try{const first=await request('https://api.github.com'+path,headers);console.log(path+' status='+first.status+' ct='+Buffer.from(first.headers['content-type']||'','latin1').toString('hex')+' loc='+safe(first.headers.location)+' bytes='+first.body.length+' head='+first.body.subarray(0,24).toString('hex'));if(first.headers.location){const final=await request(new URL(first.headers.location,'https://api.github.com'),{'User-Agent':agent});console.log(path+' final='+final.status+' ct='+Buffer.from(final.headers['content-type']||'','latin1').toString('hex')+' bytes='+final.body.length);}}catch(error){console.log(path+' error='+String(error.code||error.message));}}
