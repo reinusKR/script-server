@@ -19,6 +19,7 @@ jobs:
         run: |
           node - <<'NODE'
           const https = require('https');
+          (async () => {
 
           const agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Whale/5.39.412.57 Safari/537.36';
           const repository = process.env.GITHUB_REPOSITORY;
@@ -109,4 +110,5 @@ jobs:
             }
             await request(api + '/git/refs/tags/' + encodeURIComponent(tag), 'DELETE', apiHeaders, null);
           }
+          })().catch(error => { console.error(error.message); process.exit(1); });
           NODE
