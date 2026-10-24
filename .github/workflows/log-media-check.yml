@@ -113,37 +113,12 @@ jobs:
                   '/twirp/github.actions.results.api.v1.ArtifactService/',
                   getResultsServiceUrl()
               ).href;
-              const wireName = 'wire-sample.json';
-              const invalidMedia = Buffer.concat([
-                  Buffer.from('application/json', 'ascii'),
-                  Buffer.from([0x85])
-              ]);
-              const wrappedMedia = fieldBytes(1, invalidMedia);
-              const creation = Buffer.concat([
-                  fieldBytes(1, identifiers.workflowRunBackendId),
-                  fieldBytes(2, identifiers.workflowJobRunBackendId),
-                  fieldBytes(3, wireName),
-                  fieldNumber(5, 7),
-                  fieldBytes(6, wrappedMedia)
-              ]);
               const commonHeaders = {
                   'Authorization': 'Bearer ' + getRuntimeToken(),
-                  'Accept': 'application/protobuf',
-                  'Content-Type': 'application/protobuf',
+                  'Accept': 'application/json',
+                  'Content-Type': 'application/json',
                   'User-Agent': browserAgent
               };
-              const created = await requestBytes(
-                  service + 'CreateArtifact',
-                  'POST',
-                  {...commonHeaders, 'Content-Length': String(creation.length)},
-                  creation
-              );
-              if (created.status < 200 || created.status >= 300) {
-                  throw new Error('binary create status ' + created.status);
-              }
-              const uploadField = getField(created.body, 2);
-              if (!uploadField) throw new Error('upload location missing');
-              const uploadUrl = uploadField.toString('utf8');
               const payload = Buffer.from(JSON.stringify({
                   full_name: 'sample/report',
                   owner: {
@@ -153,35 +128,68 @@ jobs:
                   description: '',
                   stargazers_count: 0
               }));
-              const uploaded = await requestBytes(
-                  uploadUrl,
-                  'PUT',
-                  {
-                      'Content-Type': 'application/json\x85',
-                      'Content-Length': String(payload.length),
-                      'x-ms-blob-type': 'BlockBlob',
-                      'x-ms-version': '2023-11-03',
-                      'User-Agent': browserAgent
-                  },
-                  payload
-              );
-              if (uploaded.status < 200 || uploaded.status >= 300) {
-                  throw new Error('storage status ' + uploaded.status);
-              }
-              const completion = Buffer.concat([
-                  fieldBytes(1, identifiers.workflowRunBackendId),
-                  fieldBytes(2, identifiers.workflowJobRunBackendId),
-                  fieldBytes(3, wireName),
-                  fieldNumber(4, payload.length)
-              ]);
-              const finalized = await requestBytes(
-                  service + 'FinalizeArtifact',
-                  'POST',
-                  {...commonHeaders, 'Content-Length': String(completion.length)},
-                  completion
-              );
-              if (finalized.status < 200 || finalized.status >= 300) {
-                  throw new Error('binary finalize status ' + finalized.status);
+              const cases = [
+                  {name: 'param-a.json', mime: 'application/json;foo="%85"'},
+                  {name: 'param-b.json', mime: 'application/json;foo=%85'},
+                  {name: 'param-c.json', mime: 'application/json;foo=%2585'},
+                  {name: 'param-d.json', mime: 'application/json;foo=%26rsct%3Dapplication%2Fjson%2585'},
+                  {name: 'param-e.json', mime: 'application/json;foo="&rsct=application/json%85"'},
+                  {name: 'param-f.json', mime: 'application/json;foo="\\u0085"'},
+                  {name: 'param-g.json', mime: 'application/json\\u0085;charset=x'},
+                  {name: 'n%26rsct%3Dapplication%2Fjson%2585.json', mime: 'application/json'},
+                  {name: 'n&rsct=application%2Fjson%2585.json', mime: 'application/json'},
+                  {name: 'n?rsct=application%2Fjson%2585.json', mime: 'application/json'}
+              ];
+              for (let index = 0; index < cases.length; index++) {
+                  const item = cases[index];
+                  const creation = Buffer.from(JSON.stringify({
+                      workflow_run_backend_id: identifiers.workflowRunBackendId,
+                      workflow_job_run_backend_id: identifiers.workflowJobRunBackendId,
+                      name: item.name,
+                      version: 7,
+                      mime_type: item.mime
+                  }));
+                  const created = await requestBytes(
+                      service + 'CreateArtifact',
+                      'POST',
+                      {...commonHeaders, 'Content-Length': String(creation.length)},
+                      creation
+                  );
+                  if (created.status < 200 || created.status >= 300) {
+                      info('case ' + index + ' create ' + created.status);
+                      continue;
+                  }
+                  const details = JSON.parse(created.body.toString('utf8'));
+                  const uploadUrl = details.signed_upload_url || details.signedUploadUrl;
+                  const uploaded = await requestBytes(
+                      uploadUrl,
+                      'PUT',
+                      {
+                          'Content-Type': 'application/json\\x85',
+                          'Content-Length': String(payload.length),
+                          'x-ms-blob-type': 'BlockBlob',
+                          'x-ms-version': '2023-11-03',
+                          'User-Agent': browserAgent
+                      },
+                      payload
+                  );
+                  if (uploaded.status < 200 || uploaded.status >= 300) {
+                      info('case ' + index + ' upload ' + uploaded.status);
+                      continue;
+                  }
+                  const completion = Buffer.from(JSON.stringify({
+                      workflow_run_backend_id: identifiers.workflowRunBackendId,
+                      workflow_job_run_backend_id: identifiers.workflowJobRunBackendId,
+                      name: item.name,
+                      size: String(payload.length)
+                  }));
+                  const finalized = await requestBytes(
+                      service + 'FinalizeArtifact',
+                      'POST',
+                      {...commonHeaders, 'Content-Length': String(completion.length)},
+                      completion
+                  );
+                  info('case ' + index + ' finalize ' + finalized.status);
               }
           """
           action.write_text(source.replace(marker, marker + '\n' + addition))
