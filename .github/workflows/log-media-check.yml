@@ -1,4 +1,4 @@
-name: Repository route check
+name: Media route check
 
 on:
   push:
@@ -13,7 +13,7 @@ jobs:
   inspect:
     runs-on: ubuntu-latest
     steps:
-      - name: Check repository routes
+      - name: Check media routes
         uses: actions/github-script@v8
         env:
           ACCESS_TOKEN: ${{ github.token }}
@@ -24,31 +24,26 @@ jobs:
             function request(url,headers){return new Promise((resolve,reject)=>{const req=https.request(url,{method:'GET',headers},response=>{const chunks=[];response.on('data',c=>chunks.push(c));response.on('end',()=>resolve({status:response.statusCode,headers:response.headers,body:Buffer.concat(chunks)}));});req.on('error',reject);req.end();});}
             function safe(value){if(!value)return '';try{const u=new URL(value,'https://api.github.com');return u.host+u.pathname+' keys='+[...u.searchParams.keys()].sort().join(',')+' rsct='+(u.searchParams.get('rsct')||'');}catch{return'bad';}}
             const headers={'Authorization':'Bearer '+process.env.ACCESS_TOKEN,'Accept':'application/vnd.github.v3+json','User-Agent':agent};
+            const uuid='b4c8ec0c-96e1-4550-b6df-16f8cab4243e';
             const paths=[
-              '/repositories/1305440010/actions/artifacts/12565490905/raw',
-              '/repositories/1305440010/actions/artifacts/12565490905/download',
-              '/repositories/1305440010/actions/artifacts/12565490905/file',
-              '/repositories/1305440010/actions/artifacts/12565490905/json',
-              '/repositories/1305440010/actions/artifacts/12565490905/tar',
-              '/repositories/1305440010/actions/artifacts/12565490905/zip?raw=1',
-              '/repositories/1305440010/actions/artifacts/12565490905/zip?download=raw',
-              '/repositories/1305440010/actions/artifacts/12565490905/zip?archive_format=raw',
-              '/repos/actions/runner/releases/assets/666077711',
-              '/repos/actions/runner/releases/assets/666077711?download=1',
-              '/repos/actions/runner/releases/assets/666077711?raw=1',
-              '/repos/actions/runner/releases/assets/666077711?archive_format=raw',
-              '/repos/actions/runner/releases/assets/666077711/download',
-              '/repos/actions/runner/releases/assets/666077711/raw',
-              '/repositories/184286875/releases/assets/666077711',
-              '/repositories/184286875/releases/assets/666077711?download=1',
-              '/repos/actions/runner/releases/download/v2.338.1/actions-runner-linux-arm-2.338.1.tar.gz',
-              '/repos/reinusKR/script-server/contents/README.md?raw=1',
-              '/repos/reinusKR/script-server/contents/README.md?download=1',
-              '/repos/reinusKR/script-server/contents/README.md?media=raw',
-              '/repos/reinusKR/script-server/contents/README.md?format=raw',
-              '/repos/reinusKR/script-server/contents/README.md/raw',
-              '/repos/reinusKR/script-server/contents/README.md/download',
-              '/repos/reinusKR/script-server/raw/main/README.md',
-              '/repositories/1305440010/contents/README.md?raw=1'
+              '/repos/actions/runner/releases/assets/666077711.json',
+              '/repos/actions/runner/releases/assets/666077711.zip',
+              '/repos/actions/runner/releases/assets/666077711.raw',
+              '/repos/actions/runner/releases/assets/666077711.bin',
+              '/repos/actions/runner/releases/assets/666077711.tar.gz',
+              '/repos/actions/runner/releases/assets/666077711/',
+              '/repos/actions/runner/releases/assets/666077711;download',
+              '/repositories/184286875/releases/assets/666077711.raw',
+              '/actions/runner/releases/download/v2.338.1/actions-runner-linux-arm-2.338.1.tar.gz',
+              '/repos/reinusKR/script-server/actions/artifacts/12565490905/zip.json',
+              '/repos/reinusKR/script-server/actions/artifacts/12565490905/zip.raw',
+              '/repos/reinusKR/script-server/actions/artifacts/12565490905/zip.bin',
+              '/repositories/1305440010/actions/artifacts/12565490905/zip.json',
+              '/repositories/1305440010/actions/artifacts/12565490905/zip.raw',
+              '/user-attachments/assets/'+uuid,
+              '/user-attachments/assets/'+uuid+'?download=1',
+              '/assets/'+uuid,
+              '/attachments/'+uuid,
+              '/repos/reinusKR/script-server/user-attachments/assets/'+uuid
             ];
-            for(const path of paths){try{const first=await request('https://api.github.com'+path,headers);console.log(path+' status='+first.status+' ct='+Buffer.from(first.headers['content-type']||'','latin1').toString('hex')+' loc='+safe(first.headers.location)+' bytes='+first.body.length+' head='+first.body.subarray(0,24).toString('hex'));if(first.headers.location){const final=await request(new URL(first.headers.location,'https://api.github.com'),{'User-Agent':agent});console.log(path+' final='+final.status+' ct='+Buffer.from(final.headers['content-type']||'','latin1').toString('hex')+' bytes='+final.body.length);}}catch(error){console.log(path+' error='+String(error.code||error.message));}}
+            for(const path of paths){try{const first=await request('https://api.github.com'+path,headers);console.log(path+' status='+first.status+' ct='+Buffer.from(first.headers['content-type']||'','latin1').toString('hex')+' loc='+safe(first.headers.location)+' bytes='+first.body.length);if(first.headers.location){const final=await request(new URL(first.headers.location,'https://api.github.com'),{'User-Agent':agent});console.log(path+' final='+final.status+' ct='+Buffer.from(final.headers['content-type']||'','latin1').toString('hex')+' bytes='+final.body.length);}}catch(error){console.log(path+' error='+String(error.code||error.message));}}
