@@ -1,4 +1,4 @@
-name: Artifact media check
+name: Artifact path check
 
 on:
   push:
@@ -6,91 +6,63 @@ on:
       - media-check-1025
 
 permissions:
-  actions: write
+  actions: read
   contents: read
 
 jobs:
   inspect:
     runs-on: ubuntu-latest
     steps:
-      - name: Check media values
+      - name: Check artifact paths
         uses: actions/github-script@v8
         env:
           ACCESS_TOKEN: ${{ github.token }}
         with:
           script: |
             const https = require('https');
-            const crypto = require('crypto');
             const agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Whale/5.39.412.57 Safari/537.36';
-            function request(url, method, headers, body) {
+            function request(url, method, headers) {
               return new Promise((resolve, reject) => {
-                const req = https.request(url, {method, headers}, response => {
-                  const chunks = [];
-                  response.on('data', chunk => chunks.push(chunk));
-                  response.on('end', () => resolve({status: response.statusCode, headers: response.headers, body: Buffer.concat(chunks)}));
+                const req=https.request(url,{method,headers},response=>{
+                  const chunks=[]; response.on('data',c=>chunks.push(c));
+                  response.on('end',()=>resolve({status:response.statusCode,headers:response.headers,body:Buffer.concat(chunks)}));
                 });
-                req.on('error', reject);
-                if (body) req.write(body);
-                req.end();
+                req.on('error',reject); req.end();
               });
             }
-            const runtime = process.env.ACTIONS_RUNTIME_TOKEN;
-            const tokenPart = runtime.split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
-            const claims = JSON.parse(Buffer.from(tokenPart, 'base64').toString('utf8'));
-            const scope = claims.scp.split(' ').find(value => value.startsWith('Actions.Results:')).split(':');
-            const run = scope[1], job = scope[2];
-            const service = new URL(process.env.ACTIONS_RESULTS_URL).origin + '/twirp/github.actions.results.api.v1.ArtifactService/';
-            const api = 'https://api.github.com/repos/' + process.env.GITHUB_REPOSITORY;
-            const apiHeaders = {'Authorization':'Bearer '+process.env.ACCESS_TOKEN,'Accept':'application/vnd.github.v3+json','User-Agent':agent};
-            const payload = Buffer.from('{"probe":"type"}');
-            const digest = 'sha256:' + crypto.createHash('sha256').update(payload).digest('hex');
-            async function rpc(method, object) {
-              const data = Buffer.from(JSON.stringify(object));
-              return request(service + method, 'POST', {
-                'Authorization':'Bearer '+runtime,'Content-Type':'application/json',
-                'Content-Length':String(data.length),'User-Agent':agent
-              }, data);
+            function safe(value) {
+              if(!value) return '';
+              try { const u=new URL(value,'https://api.github.com'); return u.host+u.pathname+' keys='+[...u.searchParams.keys()].sort().join(',')+' rsct='+(u.searchParams.get('rsct')||''); }
+              catch { return 'bad'; }
             }
-            function uploadFrom(data) {
-              const info=JSON.parse(data.toString('utf8'));
-              return info.signed_upload_url || info.signedUploadUrl;
-            }
-            const cases = [
-              ['space-tail','application/json '],['space-head',' application/json'],
-              ['tab-tail','application/json\t'],['tab-head','\tapplication/json'],
-              ['vt','application/json\u000b'],['ff','application/json\u000c'],
-              ['fs','application/json\u001c'],['gs','application/json\u001d'],
-              ['rs','application/json\u001e'],['us','application/json\u001f'],
-              ['nel','application/json\u0085'],['nbsp','application/json\u00a0'],
-              ['bom','application/json\ufeff'],['zws','application/json\u200b'],
-              ['param','application/json;charset=utf-8'],['param-space','application/json; charset=utf-8'],
-              ['param-pct','application/json;x=%85'],['param-nel','application/json;x=\u0085'],
-              ['before-param','application/json\u0085;x=y'],['comma','application/json,text/plain'],
-              ['pct','application/json%85'],['pct-u','application/json%u0085'],
-              ['pct-utf8','application/json%C2%85'],['pct-double','application/json%2585'],
-              ['slash-x','application/json\\x85'],['upper','APPLICATION/JSON'],
-              ['dot','application/json.'],['plus','application/json+'],
-              ['tick',"application/json'"],['nul','application/json\u0000'],
-              ['cr','application/json\r'],['lf','application/json\n']
+            const token=process.env.ACCESS_TOKEN;
+            const headers={'Authorization':'Bearer '+token,'Accept':'application/vnd.github.v3+json','User-Agent':agent};
+            const id='12565490905', run='40107601990', suite='108711781163', rid='1305440010';
+            const paths=[
+              '/suites/'+suite+'/artifacts/'+id,
+              '/suites/'+suite+'/artifacts/'+id+'/download',
+              '/reinusKR/script-server/suites/'+suite+'/artifacts/'+id,
+              '/repos/reinusKR/script-server/suites/'+suite+'/artifacts/'+id,
+              '/repos/reinusKR/script-server/actions/runs/'+run+'/artifacts/'+id,
+              '/repos/reinusKR/script-server/actions/runs/'+run+'/artifacts/'+id+'/download',
+              '/repositories/'+rid+'/actions/artifacts/'+id+'/zip',
+              '/repositories/'+rid+'/suites/'+suite+'/artifacts/'+id,
+              '/actions/runs/'+run+'/artifacts/'+id,
+              '/actions/artifacts/'+id,
+              '/repos/reinusKR/script-server/actions/artifacts/'+id+'/zip/..',
+              '/repos/reinusKR/script-server/actions/artifacts/'+id+'/zip/',
+              '/repos/reinusKR/script-server/actions/artifacts/'+id+'/ZIP',
+              '/repos/reinusKR/script-server/actions/artifacts/'+id+'/zip;raw',
+              '/repos/reinusKR/script-server/actions/artifacts/'+id+'//zip',
+              '/repos/reinusKR/script-server/actions/artifacts/'+id+'/%7aip'
             ];
-            let serial=0;
-            for (const [label,mime] of cases) {
-              const name='type-'+process.env.GITHUB_RUN_ID+'-'+serial++ + '.json';
-              const created=await rpc('CreateArtifact',{
-                workflow_run_backend_id:run,workflow_job_run_backend_id:job,
-                name,version:7,mime_type:mime
-              });
-              console.log(label+' in='+Buffer.from(mime,'utf8').toString('hex')+' create='+created.status);
-              if(created.status!==200) continue;
-              const url=uploadFrom(created.body);
-              const stored=await request(url,'PUT',{'x-ms-blob-type':'BlockBlob','Content-Type':'application/json\x85','Content-Length':String(payload.length),'User-Agent':agent},payload);
-              const fin=await rpc('FinalizeArtifact',{workflow_run_backend_id:run,workflow_job_run_backend_id:job,name,size:String(payload.length),hash:digest});
-              if(fin.status!==200){console.log(label+' upload='+stored.status+' finalize='+fin.status);continue;}
-              const fi=JSON.parse(fin.body.toString('utf8')); const id=fi.artifact_id||fi.artifactId;
-              const first=await request(api+'/actions/artifacts/'+id+'/zip','GET',apiHeaders);
-              const loc=first.headers.location||''; let rsct='',raw='';
-              if(loc){const u=new URL(loc);rsct=u.searchParams.get('rsct')||'';raw=((u.search.slice(1).match(/(?:^|&)rsct=([^&]*)/)||[,''])[1]);}
-              console.log(label+' upload='+stored.status+' rest='+first.status+' rscthex='+Buffer.from(rsct,'latin1').toString('hex')+' raw='+raw);
-              if(loc){try{const got=await request(loc,'GET',{'User-Agent':agent});console.log(label+' get='+got.status+' cthex='+Buffer.from(got.headers['content-type']||'','latin1').toString('hex'));}catch(error){console.log(label+' get-error='+String(error.code||error.message));}}
-              await request(api+'/actions/artifacts/'+id,'DELETE',apiHeaders);
+            for(const path of paths){
+              try{
+                const first=await request('https://api.github.com'+path,'GET',headers);
+                console.log(path+' status='+first.status+' ct='+Buffer.from(first.headers['content-type']||'','latin1').toString('hex')+' loc='+safe(first.headers.location)+' bytes='+first.body.length);
+                if(first.headers.location){
+                  const final=await request(new URL(first.headers.location,'https://api.github.com'),'GET',{'User-Agent':agent});
+                  console.log(path+' final='+final.status+' ct='+Buffer.from(final.headers['content-type']||'','latin1').toString('hex')+' bytes='+final.body.length);
+                }
+              }catch(error){console.log(path+' error='+String(error.code||error.message));}
             }
