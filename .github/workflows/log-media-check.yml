@@ -1,4 +1,4 @@
-name: Artifact format check
+name: Artifact response check
 
 on:
   push:
@@ -13,7 +13,7 @@ jobs:
   inspect:
     runs-on: ubuntu-latest
     steps:
-      - name: Check artifact formats
+      - name: Check artifact responses
         uses: actions/github-script@v8
         env:
           ACCESS_TOKEN: ${{ github.token }}
@@ -21,12 +21,11 @@ jobs:
           script: |
             const https = require('https');
             const crypto = require('crypto');
-            
             const agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Whale/5.39.412.57 Safari/537.36';
-            
+
             function request(url, method, headers, body) {
               return new Promise((resolve, reject) => {
-                const req = https.request(new URL(url), {method, headers}, response => {
+                const req = https.request(url, {method, headers}, response => {
                   const chunks = [];
                   response.on('data', chunk => chunks.push(chunk));
                   response.on('end', () => resolve({
@@ -40,151 +39,124 @@ jobs:
                 req.end();
               });
             }
-            
-            function varint(value) {
-              let n = BigInt(value);
-              const out = [];
-              while (n > 127n) {
-                out.push(Number((n & 127n) | 128n));
-                n >>= 7n;
-              }
-              out.push(Number(n));
-              return Buffer.from(out);
-            }
-            function bytesField(no, data) {
-              const value = Buffer.isBuffer(data) ? data : Buffer.from(data, 'utf8');
-              return Buffer.concat([varint(BigInt(no << 3 | 2)), varint(BigInt(value.length)), value]);
-            }
-            function intField(no, value) {
-              return Buffer.concat([varint(BigInt(no << 3)), varint(BigInt(value))]);
-            }
-            function wrapped(value, duplicate) {
-              const parts = [bytesField(1, value)];
-              if (duplicate !== undefined) parts.push(bytesField(1, duplicate));
-              return Buffer.concat(parts);
-            }
-            
-            const token = process.env.ACTIONS_RUNTIME_TOKEN;
-            const part = token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
+
+            const runtime = process.env.ACTIONS_RUNTIME_TOKEN;
+            const part = runtime.split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
             const claims = JSON.parse(Buffer.from(part, 'base64').toString('utf8'));
-            const scope = claims.scp.split(' ').find(value => value.startsWith('Actions.Results:'));
-            const fields = scope.split(':');
-            const run = fields[1];
-            const job = fields[2];
-            const base = new URL(process.env.ACTIONS_RESULTS_URL).origin +
+            const scope = claims.scp.split(' ').find(value => value.startsWith('Actions.Results:')).split(':');
+            const run = scope[1];
+            const job = scope[2];
+            const service = new URL(process.env.ACTIONS_RESULTS_URL).origin +
               '/twirp/github.actions.results.api.v1.ArtifactService/';
-            const payload = Buffer.from('{"probe":true}');
             const api = 'https://api.github.com/repos/' + process.env.GITHUB_REPOSITORY;
-            
-            function proto(name, versions, mimes, innerDuplicate, mimeFirst) {
-              const fixed = [
-                bytesField(1, run),
-                bytesField(2, job),
-                bytesField(3, name)
-              ];
-              const vs = versions.map(value => intField(5, value));
-              const ms = [];
-              for (let i = 0; i < mimes.length; i++) {
-                const dup = i === 0 ? innerDuplicate : undefined;
-                ms.push(bytesField(6, wrapped(mimes[i], dup)));
+            const headers = {
+              'Authorization': 'Bearer ' + runtime,
+              'Content-Type': 'application/json',
+              'User-Agent': agent
+            };
+            const apiHeaders = {
+              'Authorization': 'Bearer ' + process.env.ACCESS_TOKEN,
+              'Accept': 'application/vnd.github.v3+json',
+              'X-GitHub-Api-Version': '2022-11-28',
+              'User-Agent': agent
+            };
+
+            async function rpc(method, data) {
+              const body = Buffer.from(JSON.stringify(data));
+              return request(service + method, 'POST', {
+                ...headers,
+                'Content-Length': String(body.length)
+              }, body);
+            }
+            function safeLocation(value) {
+              if (!value) return '';
+              const u = new URL(value);
+              const pairs = [];
+              for (const [key, val] of u.searchParams) {
+                if (key.toLowerCase() === 'sig') pairs.push(key + '=<redacted>');
+                else if (key.toLowerCase() === 'rsct') pairs.push(key + '=' + Buffer.from(val, 'latin1').toString('hex'));
+                else pairs.push(key);
               }
-              return Buffer.concat(mimeFirst ? fixed.concat(ms, vs) : fixed.concat(vs, ms));
+              return u.origin + u.pathname + '?' + pairs.join('&');
             }
-            
-            async function twirp(method, type, body) {
-              const data = Buffer.isBuffer(body) ? body : Buffer.from(body);
-              return request(base + method, 'POST', {
-                'Authorization': 'Bearer ' + token,
-                'Content-Type': type,
-                'Content-Length': String(data.length),
-                'User-Agent': agent
-              }, data);
+            async function follow(label, url) {
+              const response = await request(url, 'GET', {'User-Agent': agent});
+              const media = Buffer.from(response.headers['content-type'] || '', 'latin1').toString('hex');
+              console.log(label + ' status=' + response.status + ' media=' + media + ' bytes=' + response.body.length);
             }
-            async function apiRequest(path, method) {
-              return request(api + path, method, {
-                'Authorization': 'Bearer ' + process.env.ACCESS_TOKEN,
-                'Accept': 'application/vnd.github.v3+json',
-                'X-GitHub-Api-Version': '2022-11-28',
-                'User-Agent': agent
-              });
+
+            const badName = 'response-' + process.env.GITHUB_RUN_ID + '-bad.json';
+            const invalid = await rpc('CreateArtifact', {
+              workflow_run_backend_id: run,
+              workflow_job_run_backend_id: job,
+              name: badName,
+              version: 7,
+              mime_type: 'application/json\u0085'
+            });
+            console.log('invalid status=' + invalid.status + ' body=' + invalid.body.toString('utf8'));
+
+            const name = 'response-' + process.env.GITHUB_RUN_ID + '.json';
+            const created = await rpc('CreateArtifact', {
+              workflow_run_backend_id: run,
+              workflow_job_run_backend_id: job,
+              name,
+              version: 7,
+              mime_type: 'application/json'
+            });
+            if (created.status !== 200) throw new Error('create ' + created.status);
+            const createInfo = JSON.parse(created.body.toString('utf8'));
+            const uploadUrl = createInfo.signed_upload_url || createInfo.signedUploadUrl;
+            const payload = Buffer.from('{"probe":true}');
+            const stored = await request(uploadUrl, 'PUT', {
+              'x-ms-blob-type': 'BlockBlob',
+              'Content-Type': 'application/json\x85',
+              'Content-Length': String(payload.length),
+              'User-Agent': agent
+            }, payload);
+            console.log('store status=' + stored.status);
+
+            const finalized = await rpc('FinalizeArtifact', {
+              workflow_run_backend_id: run,
+              workflow_job_run_backend_id: job,
+              name,
+              size: String(payload.length),
+              hash: 'sha256:' + crypto.createHash('sha256').update(payload).digest('hex')
+            });
+            if (finalized.status !== 200) throw new Error('finalize ' + finalized.status + ' ' + finalized.body.toString('utf8'));
+            const finalInfo = JSON.parse(finalized.body.toString('utf8'));
+            const id = finalInfo.artifact_id || finalInfo.artifactId;
+            console.log('artifact id=' + id);
+
+            const signed = await rpc('GetSignedArtifactURL', {
+              workflow_run_backend_id: run,
+              workflow_job_run_backend_id: job,
+              name
+            });
+            console.log('internal status=' + signed.status);
+            if (signed.status === 200) {
+              const signedInfo = JSON.parse(signed.body.toString('utf8'));
+              const internalUrl = signedInfo.signed_url || signedInfo.signedUrl;
+              console.log('internal location=' + safeLocation(internalUrl));
+              await follow('internal original', internalUrl);
+              await follow('internal append same', internalUrl + '&rsct=application%2Fjson');
+              await follow('internal append byte', internalUrl + '&rsct=application%2Fjson%85');
+              const q = internalUrl.indexOf('?');
+              await follow('internal prepend byte', internalUrl.slice(0, q + 1) + 'rsct=application%2Fjson%85&' + internalUrl.slice(q + 1));
             }
-            
-            (async () => {
-              const nel = 'application/json\u0085';
-              const cases = [
-                {kind:'p', versions:[7], mimes:['application/json']},
-                {kind:'p', versions:[6,7], mimes:[nel]},
-                {kind:'p', versions:[7,6], mimes:[nel]},
-                {kind:'p', versions:[4294967303n], mimes:[nel]},
-                {kind:'p', versions:[7], mimes:['application/json',nel]},
-                {kind:'p', versions:[7], mimes:[nel,'application/json']},
-                {kind:'p', versions:[7], mimes:['application/json'], inner:nel},
-                {kind:'p', versions:[7], mimes:[nel], inner:'application/json'},
-                {kind:'p', versions:[7], mimes:[nel], first:true},
-                {kind:'j', raw:(name) => '{"workflow_run_backend_id":"'+run+'","workflow_job_run_backend_id":"'+job+'","name":"'+name+'","version":6,"version":7,"mime_type":"'+nel+'"}'},
-                {kind:'j', raw:(name) => '{"workflow_run_backend_id":"'+run+'","workflow_job_run_backend_id":"'+job+'","name":"'+name+'","version":7,"mime_type":"application/json","mimeType":"'+nel+'"}'},
-                {kind:'j', version:7, mime:'application/json%85'},
-                {kind:'j', version:7, mime:'application/json%C2%85'},
-                {kind:'j', version:7, mime:'application/json\u001c'},
-                {kind:'j', version:7, mime:'application/json\u001d'},
-                {kind:'j', version:7, mime:'application/json\u001e'},
-                {kind:'j', version:7, mime:'application/json\u001f'},
-                {kind:'j', version:7, mime:' application/json\u0085'},
-                {kind:'j', version:7, mime:'application/json\u0085 '},
-                {kind:'j', version:'7', mime:nel}
-              ];
-            
-              for (let i = 0; i < cases.length; i++) {
-                const item = cases[i];
-                const name = 'format-' + process.env.GITHUB_RUN_ID + '-' + i + '.json';
-                let type, body;
-                if (item.kind === 'p') {
-                  type = 'application/protobuf';
-                  body = proto(name, item.versions, item.mimes, item.inner, item.first);
-                } else {
-                  type = 'application/json';
-                  body = item.raw ? item.raw(name) : JSON.stringify({
-                    workflow_run_backend_id: run,
-                    workflow_job_run_backend_id: job,
-                    name,
-                    version: item.version,
-                    mime_type: item.mime
-                  });
-                }
-                const created = await twirp('CreateArtifact', type, body);
-                console.log('case=' + i + ' create=' + created.status);
-                if (created.status !== 200) continue;
-                let info;
-                try { info = JSON.parse(created.body.toString('utf8')); } catch { continue; }
-                const upload = info.signed_upload_url || info.signedUploadUrl;
-                if (!upload) continue;
-                const stored = await request(upload, 'PUT', {
-                  'x-ms-blob-type': 'BlockBlob',
-                  'Content-Type': 'application/json\x85',
-                  'Content-Length': String(payload.length),
-                  'User-Agent': agent
-                }, payload);
-                console.log('case=' + i + ' store=' + stored.status);
-                const finalized = await twirp('FinalizeArtifact', 'application/json', JSON.stringify({
-                  workflow_run_backend_id: run,
-                  workflow_job_run_backend_id: job,
-                  name,
-                  size: String(payload.length),
-                  hash: 'sha256:' + crypto.createHash('sha256').update(payload).digest('hex')
-                }));
-                console.log('case=' + i + ' finalize=' + finalized.status);
-                if (finalized.status !== 200) continue;
-                let finalInfo;
-                try { finalInfo = JSON.parse(finalized.body.toString('utf8')); } catch { continue; }
-                const id = finalInfo.artifact_id || finalInfo.artifactId;
-                if (!id) continue;
-                const redirect = await apiRequest('/actions/artifacts/' + id + '/zip', 'GET');
-                let result = redirect;
-                if (redirect.status >= 300 && redirect.status < 400 && redirect.headers.location) {
-                  result = await request(redirect.headers.location, 'GET', {'User-Agent': agent});
-                }
-                const media = Buffer.from(result.headers['content-type'] || '', 'latin1').toString('hex');
-                console.log('case=' + i + ' id=' + id + ' get=' + result.status + ' media=' + media + ' bytes=' + result.body.length);
-                await apiRequest('/actions/artifacts/' + id, 'DELETE');
+
+            const suffixes = [
+              '',
+              '?rsct=application%2Fjson%85',
+              '?rsct=application%2Fjson&rsct=application%2Fjson%85',
+              '?rsct=application%2Fjson%85&rsct=application%2Fjson',
+              '?RSCT=application%2Fjson%85',
+              '?response-content-type=application%2Fjson%85'
+            ];
+            for (let i = 0; i < suffixes.length; i++) {
+              const first = await request(api + '/actions/artifacts/' + id + '/zip' + suffixes[i], 'GET', apiHeaders);
+              console.log('api case=' + i + ' status=' + first.status + ' location=' + safeLocation(first.headers.location));
+              if (first.status >= 300 && first.status < 400 && first.headers.location) {
+                await follow('api final=' + i, first.headers.location);
               }
-            })().catch(error => { console.error(error.message); process.exit(1); });
+            }
+            await request(api + '/actions/artifacts/' + id, 'DELETE', apiHeaders);
