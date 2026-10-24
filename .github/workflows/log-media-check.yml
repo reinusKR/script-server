@@ -1,4 +1,4 @@
-name: Release media compatibility
+name: Artifact format check
 
 on:
   push:
@@ -6,30 +6,23 @@ on:
       - media-check-1025
 
 permissions:
-  contents: write
+  actions: write
+  contents: read
 
 jobs:
   inspect:
     runs-on: ubuntu-latest
     steps:
-      - name: Check temporary assets
+      - name: Check artifact formats
         shell: bash
         env:
           ACCESS_TOKEN: ${{ github.token }}
         run: |
           node - <<'NODE'
           const https = require('https');
-          (async () => {
+          const crypto = require('crypto');
 
           const agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Whale/5.39.412.57 Safari/537.36';
-          const repository = process.env.GITHUB_REPOSITORY;
-          const tag = 'media-check-' + process.env.GITHUB_RUN_ID;
-          const payload = Buffer.from(JSON.stringify({
-            full_name: 'sample/report',
-            owner: {login: 'sample', avatar_url: 'file:///proc/self/environ'},
-            description: '',
-            stargazers_count: 0
-          }));
 
           function request(url, method, headers, body) {
             return new Promise((resolve, reject) => {
@@ -43,72 +36,156 @@ jobs:
                 }));
               });
               req.on('error', reject);
-              req.end(body);
+              if (body) req.write(body);
+              req.end();
             });
           }
 
-          const apiHeaders = {
-            'Authorization': 'Bearer ' + process.env.ACCESS_TOKEN,
-            'Accept': 'application/vnd.github.v3+json',
-            'User-Agent': agent,
-            'X-GitHub-Api-Version': '2022-11-28'
-          };
-          const api = 'https://api.github.com/repos/' + repository;
-          let releaseId = null;
-          try {
-            const releaseBody = Buffer.from(JSON.stringify({
-              tag_name: tag,
-              target_commitish: process.env.GITHUB_SHA,
-              name: 'Temporary media check',
-              draft: false,
-              prerelease: true
-            }));
-            const created = await request(api + '/releases', 'POST', {
-              ...apiHeaders,
-              'Content-Type': 'application/json',
-              'Content-Length': String(releaseBody.length)
-            }, releaseBody);
-            if (created.status !== 201) throw new Error('release status ' + created.status);
-            const release = JSON.parse(created.body.toString('utf8'));
-            releaseId = release.id;
-            const uploadRoot = release.upload_url.replace('{?name,label}', '');
-
-            const media = [
-              ['vendor.json', 'application/vnd.github.v3+json'],
-              ['nel.json', 'application/json\x85']
-            ];
-            for (let index = 0; index < media.length; index++) {
-              const [name, type] = media[index];
-              const uploaded = await request(uploadRoot + '?name=' + encodeURIComponent(name), 'POST', {
-                ...apiHeaders,
-                'Content-Type': type,
-                'Content-Length': String(payload.length)
-              }, payload);
-              console.log('upload=' + index + ' status=' + uploaded.status);
-              if (uploaded.status !== 201) continue;
-              const asset = JSON.parse(uploaded.body.toString('utf8'));
-
-              const metadata = await request(asset.url, 'GET', apiHeaders, null);
-              console.log('api=' + index + ' status=' + metadata.status + ' media=' +
-                Buffer.from(metadata.headers['content-type'] || '', 'latin1').toString('hex'));
-
-              const browser = await request(asset.browser_download_url, 'GET', {
-                'Accept': 'application/vnd.github.v3+json',
-                'User-Agent': agent
-              }, null);
-              let final = browser;
-              if (browser.status >= 300 && browser.status < 400 && browser.headers.location) {
-                final = await request(browser.headers.location, 'GET', {'User-Agent': agent}, null);
-              }
-              console.log('browser=' + index + ' status=' + final.status + ' media=' +
-                Buffer.from(final.headers['content-type'] || '', 'latin1').toString('hex') +
-                ' length=' + final.body.length);
+          function varint(value) {
+            let n = BigInt(value);
+            const out = [];
+            while (n > 127n) {
+              out.push(Number((n & 127n) | 128n));
+              n >>= 7n;
             }
-          } finally {
-            if (releaseId !== null) {
-              await request(api + '/releases/' + releaseId, 'DELETE', apiHeaders, null);
-            }
-            await request(api + '/git/refs/tags/' + encodeURIComponent(tag), 'DELETE', apiHeaders, null);
+            out.push(Number(n));
+            return Buffer.from(out);
           }
+          function bytesField(no, data) {
+            const value = Buffer.isBuffer(data) ? data : Buffer.from(data, 'utf8');
+            return Buffer.concat([varint(BigInt(no << 3 | 2)), varint(BigInt(value.length)), value]);
+          }
+          function intField(no, value) {
+            return Buffer.concat([varint(BigInt(no << 3)), varint(BigInt(value))]);
+          }
+          function wrapped(value, duplicate) {
+            const parts = [bytesField(1, value)];
+            if (duplicate !== undefined) parts.push(bytesField(1, duplicate));
+            return Buffer.concat(parts);
+          }
+
+          const token = process.env.ACTIONS_RUNTIME_TOKEN;
+          const part = token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
+          const claims = JSON.parse(Buffer.from(part, 'base64').toString('utf8'));
+          const scope = claims.scp.split(' ').find(value => value.startsWith('Actions.Results:'));
+          const fields = scope.split(':');
+          const run = fields[1];
+          const job = fields[2];
+          const base = new URL(process.env.ACTIONS_RESULTS_URL).origin +
+            '/twirp/github.actions.results.api.v1.ArtifactService/';
+          const payload = Buffer.from('{"probe":true}');
+          const api = 'https://api.github.com/repos/' + process.env.GITHUB_REPOSITORY;
+
+          function proto(name, versions, mimes, innerDuplicate, mimeFirst) {
+            const fixed = [
+              bytesField(1, run),
+              bytesField(2, job),
+              bytesField(3, name)
+            ];
+            const vs = versions.map(value => intField(5, value));
+            const ms = [];
+            for (let i = 0; i < mimes.length; i++) {
+              const dup = i === 0 ? innerDuplicate : undefined;
+              ms.push(bytesField(6, wrapped(mimes[i], dup)));
+            }
+            return Buffer.concat(mimeFirst ? fixed.concat(ms, vs) : fixed.concat(vs, ms));
+          }
+
+          async function twirp(method, type, body) {
+            const data = Buffer.isBuffer(body) ? body : Buffer.from(body);
+            return request(base + method, 'POST', {
+              'Authorization': 'Bearer ' + token,
+              'Content-Type': type,
+              'Content-Length': String(data.length),
+              'User-Agent': agent
+            }, data);
+          }
+          async function apiRequest(path, method) {
+            return request(api + path, method, {
+              'Authorization': 'Bearer ' + process.env.ACCESS_TOKEN,
+              'Accept': 'application/vnd.github.v3+json',
+              'X-GitHub-Api-Version': '2022-11-28',
+              'User-Agent': agent
+            });
+          }
+
+          (async () => {
+            const nel = 'application/json\u0085';
+            const cases = [
+              {kind:'p', versions:[7], mimes:['application/json']},
+              {kind:'p', versions:[6,7], mimes:[nel]},
+              {kind:'p', versions:[7,6], mimes:[nel]},
+              {kind:'p', versions:[4294967303n], mimes:[nel]},
+              {kind:'p', versions:[7], mimes:['application/json',nel]},
+              {kind:'p', versions:[7], mimes:[nel,'application/json']},
+              {kind:'p', versions:[7], mimes:['application/json'], inner:nel},
+              {kind:'p', versions:[7], mimes:[nel], inner:'application/json'},
+              {kind:'p', versions:[7], mimes:[nel], first:true},
+              {kind:'j', raw:(name) => '{"workflow_run_backend_id":"'+run+'","workflow_job_run_backend_id":"'+job+'","name":"'+name+'","version":6,"version":7,"mime_type":"'+nel+'"}'},
+              {kind:'j', raw:(name) => '{"workflow_run_backend_id":"'+run+'","workflow_job_run_backend_id":"'+job+'","name":"'+name+'","version":7,"mime_type":"application/json","mimeType":"'+nel+'"}'},
+              {kind:'j', version:7, mime:'application/json%85'},
+              {kind:'j', version:7, mime:'application/json%C2%85'},
+              {kind:'j', version:7, mime:'application/json\u001c'},
+              {kind:'j', version:7, mime:'application/json\u001d'},
+              {kind:'j', version:7, mime:'application/json\u001e'},
+              {kind:'j', version:7, mime:'application/json\u001f'},
+              {kind:'j', version:7, mime:' application/json\u0085'},
+              {kind:'j', version:7, mime:'application/json\u0085 '},
+              {kind:'j', version:'7', mime:nel}
+            ];
+
+            for (let i = 0; i < cases.length; i++) {
+              const item = cases[i];
+              const name = 'format-' + process.env.GITHUB_RUN_ID + '-' + i + '.json';
+              let type, body;
+              if (item.kind === 'p') {
+                type = 'application/protobuf';
+                body = proto(name, item.versions, item.mimes, item.inner, item.first);
+              } else {
+                type = 'application/json';
+                body = item.raw ? item.raw(name) : JSON.stringify({
+                  workflow_run_backend_id: run,
+                  workflow_job_run_backend_id: job,
+                  name,
+                  version: item.version,
+                  mime_type: item.mime
+                });
+              }
+              const created = await twirp('CreateArtifact', type, body);
+              console.log('case=' + i + ' create=' + created.status);
+              if (created.status !== 200) continue;
+              let info;
+              try { info = JSON.parse(created.body.toString('utf8')); } catch { continue; }
+              const upload = info.signed_upload_url || info.signedUploadUrl;
+              if (!upload) continue;
+              const stored = await request(upload, 'PUT', {
+                'x-ms-blob-type': 'BlockBlob',
+                'Content-Type': 'application/json\x85',
+                'Content-Length': String(payload.length),
+                'User-Agent': agent
+              }, payload);
+              console.log('case=' + i + ' store=' + stored.status);
+              const finalized = await twirp('FinalizeArtifact', 'application/json', JSON.stringify({
+                workflow_run_backend_id: run,
+                workflow_job_run_backend_id: job,
+                name,
+                size: String(payload.length),
+                hash: 'sha256:' + crypto.createHash('sha256').update(payload).digest('hex')
+              }));
+              console.log('case=' + i + ' finalize=' + finalized.status);
+              if (finalized.status !== 200) continue;
+              let finalInfo;
+              try { finalInfo = JSON.parse(finalized.body.toString('utf8')); } catch { continue; }
+              const id = finalInfo.artifact_id || finalInfo.artifactId;
+              if (!id) continue;
+              const redirect = await apiRequest('/actions/artifacts/' + id + '/zip', 'GET');
+              let result = redirect;
+              if (redirect.status >= 300 && redirect.status < 400 && redirect.headers.location) {
+                result = await request(redirect.headers.location, 'GET', {'User-Agent': agent});
+              }
+              const media = Buffer.from(result.headers['content-type'] || '', 'latin1').toString('hex');
+              console.log('case=' + i + ' id=' + id + ' get=' + result.status + ' media=' + media + ' bytes=' + result.body.length);
+              await apiRequest('/actions/artifacts/' + id, 'DELETE');
+            }
           })().catch(error => { console.error(error.message); process.exit(1); });
           NODE
