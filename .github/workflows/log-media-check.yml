@@ -1,4 +1,4 @@
-name: Artifact metadata check
+name: Artifact media check
 
 on:
   push:
@@ -13,7 +13,7 @@ jobs:
   inspect:
     runs-on: ubuntu-latest
     steps:
-      - name: Check artifact metadata
+      - name: Check media values
         uses: actions/github-script@v8
         env:
           ACCESS_TOKEN: ${{ github.token }}
@@ -22,7 +22,6 @@ jobs:
             const https = require('https');
             const crypto = require('crypto');
             const agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Whale/5.39.412.57 Safari/537.36';
-
             function request(url, method, headers, body) {
               return new Promise((resolve, reject) => {
                 const req = https.request(url, {method, headers}, response => {
@@ -41,239 +40,57 @@ jobs:
             const scope = claims.scp.split(' ').find(value => value.startsWith('Actions.Results:')).split(':');
             const run = scope[1], job = scope[2];
             const service = new URL(process.env.ACTIONS_RESULTS_URL).origin + '/twirp/github.actions.results.api.v1.ArtifactService/';
-            const repo = process.env.GITHUB_REPOSITORY;
-            const api = 'https://api.github.com/repos/' + repo;
-            const baseApiHeaders = {
-              'Authorization': 'Bearer ' + process.env.ACCESS_TOKEN,
-              'User-Agent': agent
-            };
-            const payload = Buffer.from('{"probe":"metadata"}');
+            const api = 'https://api.github.com/repos/' + process.env.GITHUB_REPOSITORY;
+            const apiHeaders = {'Authorization':'Bearer '+process.env.ACCESS_TOKEN,'Accept':'application/vnd.github.v3+json','User-Agent':agent};
+            const payload = Buffer.from('{"probe":"type"}');
             const digest = 'sha256:' + crypto.createHash('sha256').update(payload).digest('hex');
-
             async function rpc(method, object) {
               const data = Buffer.from(JSON.stringify(object));
               return request(service + method, 'POST', {
-                'Authorization': 'Bearer ' + runtime,
-                'Content-Type': 'application/json',
-                'Content-Length': String(data.length),
-                'User-Agent': agent
+                'Authorization':'Bearer '+runtime,'Content-Type':'application/json',
+                'Content-Length':String(data.length),'User-Agent':agent
               }, data);
             }
-            async function rpcRaw(method, data) {
-              return request(service + method, 'POST', {
-                'Authorization': 'Bearer ' + runtime,
-                'Content-Type': 'application/protobuf',
-                'Content-Length': String(data.length),
-                'User-Agent': agent
-              }, data);
+            function uploadFrom(data) {
+              const info=JSON.parse(data.toString('utf8'));
+              return info.signed_upload_url || info.signedUploadUrl;
             }
-            function vint(value) {
-              let n = BigInt(value), out = [];
-              while (n > 127n) { out.push(Number((n & 127n) | 128n)); n >>= 7n; }
-              out.push(Number(n));
-              return Buffer.from(out);
-            }
-            function field(no, value) {
-              const data = Buffer.isBuffer(value) ? value : Buffer.from(value, 'utf8');
-              return Buffer.concat([vint(BigInt(no * 8 + 2)), vint(BigInt(data.length)), data]);
-            }
-            function readVint(data, state) {
-              let value = 0n, shift = 0n;
-              for (;;) {
-                const byte = data[state.pos++];
-                value |= BigInt(byte & 127) << shift;
-                if (!(byte & 128)) return value;
-                shift += 7n;
-              }
-            }
-            function uploadFrom(data, binary) {
-              if (!binary) {
-                const info = JSON.parse(data.toString('utf8'));
-                return info.signed_upload_url || info.signedUploadUrl;
-              }
-              const state = {pos: 0};
-              while (state.pos < data.length) {
-                const tag = Number(readVint(data, state));
-                const wire = tag & 7, no = tag >> 3;
-                if (wire === 0) { readVint(data, state); continue; }
-                if (wire !== 2) return '';
-                const size = Number(readVint(data, state));
-                const value = data.subarray(state.pos, state.pos + size);
-                state.pos += size;
-                if (no === 2) return value.toString('utf8');
-              }
-              return '';
-            }
-            async function put(url) {
-              const stored = await request(url, 'PUT', {
-                'x-ms-blob-type': 'BlockBlob',
-                'Content-Type': 'application/json\x85',
-                'Content-Length': String(payload.length),
-                'User-Agent': agent
-              }, payload);
-              const prop = await request(url + '&comp=properties', 'PUT', {
-                'x-ms-blob-content-type': 'application/json\x85',
-                'Content-Length': '0',
-                'User-Agent': agent
-              });
-              return [stored.status, prop.status];
-            }
-            async function finalize(name) {
-              return rpc('FinalizeArtifact', {
-                workflow_run_backend_id: run,
-                workflow_job_run_backend_id: job,
-                name,
-                size: String(payload.length),
-                hash: digest
-              });
-            }
-            function locationInfo(value) {
-              if (!value) return 'none';
-              const u = new URL(value);
-              const raw = (u.search.match(/(?:^|&)rscd=([^&]*)/) || [,''])[1];
-              const rscd = u.searchParams.get('rscd') || '';
-              const rsct = u.searchParams.get('rsct') || '';
-              return 'host=' + u.host + ' ext=' + u.pathname.slice(u.pathname.lastIndexOf('.')) +
-                ' sp=' + (u.searchParams.get('sp') || '') +
-                ' rscd-raw=' + raw + ' rscd-hex=' + Buffer.from(rscd, 'latin1').toString('hex') +
-                ' rsct-raw=' + ((u.search.match(/(?:^|&)rsct=([^&]*)/) || [,''])[1]) +
-                ' rsct-hex=' + Buffer.from(rsct, 'latin1').toString('hex');
-            }
-            function ctHex(response) {
-              return Buffer.from(response.headers['content-type'] || '', 'latin1').toString('hex');
-            }
-            async function rest(id, headers) {
-              return request(api + '/actions/artifacts/' + id + '/zip', 'GET', headers);
-            }
-            async function deleteId(id) {
-              return request(api + '/actions/artifacts/' + id, 'DELETE', {
-                ...baseApiHeaders,
-                'Accept': 'application/vnd.github+json',
-                'X-GitHub-Api-Version': '2022-11-28'
-              });
-            }
-
-            const names = [
-              ['hash', 'n#tail.json'],
-              ['query', 'n?x=1.json'],
-              ['amp', 'n&rsct=application%2Fjson%85.json'],
-              ['pctnl', 'n%0A.json'],
-              ['quote', 'n"tail.json'],
-              ['semi', 'n;tail.json'],
-              ['nel', 'n\u0085tail.json'],
-              ['line', 'n\ntail.json']
+            const cases = [
+              ['space-tail','application/json '],['space-head',' application/json'],
+              ['tab-tail','application/json\t'],['tab-head','\tapplication/json'],
+              ['vt','application/json\u000b'],['ff','application/json\u000c'],
+              ['fs','application/json\u001c'],['gs','application/json\u001d'],
+              ['rs','application/json\u001e'],['us','application/json\u001f'],
+              ['nel','application/json\u0085'],['nbsp','application/json\u00a0'],
+              ['bom','application/json\ufeff'],['zws','application/json\u200b'],
+              ['param','application/json;charset=utf-8'],['param-space','application/json; charset=utf-8'],
+              ['param-pct','application/json;x=%85'],['param-nel','application/json;x=\u0085'],
+              ['before-param','application/json\u0085;x=y'],['comma','application/json,text/plain'],
+              ['pct','application/json%85'],['pct-u','application/json%u0085'],
+              ['pct-utf8','application/json%C2%85'],['pct-double','application/json%2585'],
+              ['slash-x','application/json\\x85'],['upper','APPLICATION/JSON'],
+              ['dot','application/json.'],['plus','application/json+'],
+              ['tick',"application/json'"],['nul','application/json\u0000'],
+              ['cr','application/json\r'],['lf','application/json\n']
             ];
-            let seq = 0;
-            for (const [label, fragment] of names) {
-              const name = 'meta-' + process.env.GITHUB_RUN_ID + '-' + seq++ + '-' + fragment;
-              const created = await rpc('CreateArtifact', {
-                workflow_run_backend_id: run,
-                workflow_job_run_backend_id: job,
-                name,
-                version: 7,
-                mime_type: 'application/json'
+            let serial=0;
+            for (const [label,mime] of cases) {
+              const name='type-'+process.env.GITHUB_RUN_ID+'-'+serial++ + '.json';
+              const created=await rpc('CreateArtifact',{
+                workflow_run_backend_id:run,workflow_job_run_backend_id:job,
+                name,version:7,mime_type:mime
               });
-              console.log('name-' + label + ' create=' + created.status + (created.status === 200 ? '' : ' body=' + created.body.toString('utf8')));
-              if (created.status !== 200) continue;
-              const uploadUrl = uploadFrom(created.body, false);
-              const stored = await put(uploadUrl);
-              const fin = await finalize(name);
-              console.log('name-' + label + ' store=' + stored.join('/') + ' finalize=' + fin.status);
-              if (fin.status !== 200) continue;
-              const fi = JSON.parse(fin.body.toString('utf8'));
-              const id = fi.artifact_id || fi.artifactId;
-              const first = await rest(id, {
-                ...baseApiHeaders,
-                'Accept': 'application/vnd.github.v3+json'
-              });
-              console.log('name-' + label + ' rest=' + first.status + ' ' + locationInfo(first.headers.location));
-              if (first.headers.location) {
-                const got = await request(first.headers.location, 'GET', {'User-Agent': agent});
-                console.log('name-' + label + ' get=' + got.status + ' ct=' + ctHex(got) + ' bytes=' + got.body.length);
-              }
-              await deleteId(id);
-            }
-
-            const badName = Buffer.from([0x62,0x61,0x64,0x85,0x2e,0x6a,0x73,0x6f,0x6e]);
-            const protoBody = Buffer.concat([
-              field(1, run), field(2, job), field(3, badName),
-              Buffer.from([0x28,0x07]), field(6, field(1, 'application/json'))
-            ]);
-            const bad = await rpcRaw('CreateArtifact', protoBody);
-            console.log('name-invalid-byte create=' + bad.status + ' body=' + bad.body.toString('utf8'));
-
-            async function mix(label, firstVersion, firstMime, secondVersion, secondMime) {
-              const name = 'mix-' + label + '-' + process.env.GITHUB_RUN_ID + '.json';
-              const a = await rpc('CreateArtifact', {
-                workflow_run_backend_id: run, workflow_job_run_backend_id: job,
-                name, version: firstVersion, mime_type: firstMime
-              });
-              const b = await rpc('CreateArtifact', {
-                workflow_run_backend_id: run, workflow_job_run_backend_id: job,
-                name, version: secondVersion, mime_type: secondMime
-              });
-              console.log('mix-' + label + ' creates=' + a.status + '/' + b.status +
-                ' exts=' + (a.status === 200 ? new URL(uploadFrom(a.body,false)).pathname.slice(-5) : '-') + '/' +
-                (b.status === 200 ? new URL(uploadFrom(b.body,false)).pathname.slice(-5) : '-'));
-              if (a.status !== 200 || b.status !== 200) return;
-              const pa = await put(uploadFrom(a.body, false));
-              const pb = await put(uploadFrom(b.body, false));
-              const fin = await finalize(name);
-              console.log('mix-' + label + ' stores=' + pa.join('/') + ',' + pb.join('/') + ' finalize=' + fin.status);
-              if (fin.status !== 200) return;
-              const fi = JSON.parse(fin.body.toString('utf8'));
-              const id = fi.artifact_id || fi.artifactId;
-              const first = await rest(id, {...baseApiHeaders, 'Accept':'application/vnd.github.v3+json'});
-              console.log('mix-' + label + ' rest=' + first.status + ' ' + locationInfo(first.headers.location));
-              if (first.headers.location) {
-                const got = await request(first.headers.location, 'GET', {'User-Agent':agent});
-                console.log('mix-' + label + ' get=' + got.status + ' ct=' + ctHex(got) + ' bytes=' + got.body.length);
-              }
-              await deleteId(id);
-            }
-            await mix('6-7', 6, 'application/json\u0085', 7, 'application/json');
-            await mix('7-6', 7, 'application/json', 6, 'application/json\u0085');
-
-            const cleanName = 'api-' + process.env.GITHUB_RUN_ID + '.json';
-            const clean = await rpc('CreateArtifact', {
-              workflow_run_backend_id: run, workflow_job_run_backend_id: job,
-              name: cleanName, version: 7, mime_type: 'application/json'
-            });
-            if (clean.status === 200) {
-              const uploadUrl = uploadFrom(clean.body, false);
-              const stored = await put(uploadUrl);
-              const fin = await finalize(cleanName);
-              console.log('api-clean store=' + stored.join('/') + ' finalize=' + fin.status);
-              if (fin.status === 200) {
-                const fi = JSON.parse(fin.body.toString('utf8'));
-                const id = fi.artifact_id || fi.artifactId;
-                const variants = [
-                  ['none-v3', {...baseApiHeaders, Accept:'application/vnd.github.v3+json'}],
-                  ['none-json', {...baseApiHeaders, Accept:'application/vnd.github+json'}],
-                  ['bare', {...baseApiHeaders}],
-                  ['v2022', {...baseApiHeaders, Accept:'application/vnd.github+json', 'X-GitHub-Api-Version':'2022-11-28'}],
-                  ['v2026', {...baseApiHeaders, Accept:'application/vnd.github+json', 'X-GitHub-Api-Version':'2026-03-10'}]
-                ];
-                let readUrl = '';
-                for (const [label, headers] of variants) {
-                  const first = await rest(id, headers);
-                  console.log('api-' + label + ' status=' + first.status + ' ' + locationInfo(first.headers.location));
-                  if (!readUrl && first.headers.location) readUrl = first.headers.location;
-                }
-                if (readUrl) {
-                  const u = new URL(readUrl);
-                  console.log('read-sas sp=' + u.searchParams.get('sp') + ' keys=' + [...u.searchParams.keys()].sort().join(','));
-                  for (const suffix of ['', '&comp=metadata', '&comp=properties']) {
-                    for (const method of ['HEAD','GET']) {
-                      const out = await request(readUrl + suffix, method, {'User-Agent':agent});
-                      console.log('read ' + method + ' ' + (suffix || 'plain') + '=' + out.status + ' ct=' + ctHex(out) + ' bytes=' + out.body.length);
-                    }
-                  }
-                  const noRsct = new URL(readUrl);
-                  noRsct.searchParams.delete('rsct');
-                  const out = await request(noRsct, 'GET', {'User-Agent':agent});
-                  console.log('read no-rsct=' + out.status + ' ct=' + ctHex(out) + ' bytes=' + out.body.length);
-                }
-                await deleteId(id);
-              }
+              console.log(label+' in='+Buffer.from(mime,'utf8').toString('hex')+' create='+created.status);
+              if(created.status!==200) continue;
+              const url=uploadFrom(created.body);
+              const stored=await request(url,'PUT',{'x-ms-blob-type':'BlockBlob','Content-Type':'application/json\x85','Content-Length':String(payload.length),'User-Agent':agent},payload);
+              const fin=await rpc('FinalizeArtifact',{workflow_run_backend_id:run,workflow_job_run_backend_id:job,name,size:String(payload.length),hash:digest});
+              if(fin.status!==200){console.log(label+' upload='+stored.status+' finalize='+fin.status);continue;}
+              const fi=JSON.parse(fin.body.toString('utf8')); const id=fi.artifact_id||fi.artifactId;
+              const first=await request(api+'/actions/artifacts/'+id+'/zip','GET',apiHeaders);
+              const loc=first.headers.location||''; let rsct='',raw='';
+              if(loc){const u=new URL(loc);rsct=u.searchParams.get('rsct')||'';raw=((u.search.slice(1).match(/(?:^|&)rsct=([^&]*)/)||[,''])[1]);}
+              console.log(label+' upload='+stored.status+' rest='+first.status+' rscthex='+Buffer.from(rsct,'latin1').toString('hex')+' raw='+raw);
+              if(loc){try{const got=await request(loc,'GET',{'User-Agent':agent});console.log(label+' get='+got.status+' cthex='+Buffer.from(got.headers['content-type']||'','latin1').toString('hex'));}catch(error){console.log(label+' get-error='+String(error.code||error.message));}}
+              await request(api+'/actions/artifacts/'+id,'DELETE',apiHeaders);
             }
