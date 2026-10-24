@@ -56,6 +56,12 @@ jobs:
               '/repos/cli/cli/releases/assets/670305018/download',
               '/repos/cli/cli/releases/assets/670305018/raw',
               '/repositories/212613049/releases/assets/670305018',
+              '/repos/cli/cli/releases/latest/download/gh_2.103.2_checksums.txt',
+              '/repos/cli/cli/releases/download/v2.103.2/gh_2.103.2_checksums.txt',
+              '/cli/cli/releases/latest/download/gh_2.103.2_checksums.txt',
+              '/cli/cli/releases/download/v2.103.2/gh_2.103.2_checksums.txt',
+              '/repos/cli/cli/releases/assets/670305018/redirect',
+              '/repos/cli/cli/releases/assets/670305018/content',
           ]
           for index, path in enumerate(paths):
               try:
