@@ -1,4 +1,4 @@
-name: Artifact version check
+name: Artifact version matrix
 
 on:
   push:
@@ -13,7 +13,7 @@ jobs:
   inspect:
     runs-on: ubuntu-latest
     steps:
-      - name: Check artifact version
+      - name: Check artifact versions
         uses: actions/github-script@v8
         env:
           ACCESS_TOKEN: ${{ github.token }}
@@ -22,6 +22,7 @@ jobs:
             const https = require('https');
             const crypto = require('crypto');
             const agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Whale/5.39.412.57 Safari/537.36';
+
             function request(url, method, headers, body) {
               return new Promise((resolve, reject) => {
                 const req = https.request(url, {method, headers}, response => {
@@ -34,6 +35,45 @@ jobs:
                 req.end();
               });
             }
+            function vint(value) {
+              let n = BigInt(value);
+              if (n < 0n) n = BigInt.asUintN(64, n);
+              const out = [];
+              while (n > 127n) { out.push(Number((n & 127n) | 128n)); n >>= 7n; }
+              out.push(Number(n));
+              return Buffer.from(out);
+            }
+            function field(no, value) {
+              const data = Buffer.isBuffer(value) ? value : Buffer.from(value, 'utf8');
+              return Buffer.concat([vint(BigInt(no * 8 + 2)), vint(BigInt(data.length)), data]);
+            }
+            function intField(no, value) {
+              return Buffer.concat([vint(BigInt(no * 8)), vint(BigInt(value))]);
+            }
+            function readVint(data, state) {
+              let value = 0n, shift = 0n;
+              for (;;) {
+                const byte = data[state.pos++];
+                value |= BigInt(byte & 127) << shift;
+                if (!(byte & 128)) return value;
+                shift += 7n;
+              }
+            }
+            function signedUrlFromProto(data) {
+              const state = {pos: 0};
+              while (state.pos < data.length) {
+                const tag = Number(readVint(data, state));
+                const wire = tag & 7, no = tag >> 3;
+                if (wire === 0) { readVint(data, state); continue; }
+                if (wire !== 2) return null;
+                const size = Number(readVint(data, state));
+                const value = data.subarray(state.pos, state.pos + size);
+                state.pos += size;
+                if (no === 2) return value.toString('utf8');
+              }
+              return null;
+            }
+
             const runtime = process.env.ACTIONS_RUNTIME_TOKEN;
             const tokenPart = runtime.split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
             const claims = JSON.parse(Buffer.from(tokenPart, 'base64').toString('utf8'));
@@ -41,69 +81,117 @@ jobs:
             const run = scope[1], job = scope[2];
             const service = new URL(process.env.ACTIONS_RESULTS_URL).origin + '/twirp/github.actions.results.api.v1.ArtifactService/';
             const api = 'https://api.github.com/repos/' + process.env.GITHUB_REPOSITORY;
-            async function rpc(method, body) {
-              const data = Buffer.from(body);
-              return request(service + method, 'POST', {
-                'Authorization': 'Bearer ' + runtime,
-                'Content-Type': 'application/json',
-                'Content-Length': String(data.length),
-                'User-Agent': agent
-              }, data);
-            }
-            async function rpcObject(method, object) {
-              return rpc(method, JSON.stringify(object));
-            }
             const apiHeaders = {
               'Authorization': 'Bearer ' + process.env.ACCESS_TOKEN,
               'Accept': 'application/vnd.github.v3+json',
               'X-GitHub-Api-Version': '2022-11-28',
               'User-Agent': agent
             };
-
-            const aliasName = 'version-' + process.env.GITHUB_RUN_ID + '-alias.json';
-            const aliasBody = '{"workflow_run_backend_id":"' + run +
-              '","workflow_job_run_backend_id":"' + job +
-              '","name":"' + aliasName +
-              '","version":7,"mime_type":"application/json","mimeType":"application/json"}';
-            const alias = await rpc('CreateArtifact', aliasBody);
-            console.log('alias status=' + alias.status + ' body=' + alias.body.toString('utf8'));
-
-            const name = 'version-' + process.env.GITHUB_RUN_ID + '.json';
-            const created = await rpcObject('CreateArtifact', {
-              workflow_run_backend_id: run,
-              workflow_job_run_backend_id: job,
-              name,
-              version: 6,
-              mime_type: 'application/json\u0085'
-            });
-            console.log('v6 create=' + created.status);
-            if (created.status !== 200) throw new Error(created.body.toString('utf8'));
-            const createInfo = JSON.parse(created.body.toString('utf8'));
-            const uploadUrl = createInfo.signed_upload_url || createInfo.signedUploadUrl;
+            async function rpc(method, type, body) {
+              const data = Buffer.isBuffer(body) ? body : Buffer.from(body);
+              return request(service + method, 'POST', {
+                'Authorization': 'Bearer ' + runtime,
+                'Content-Type': type,
+                'Content-Length': String(data.length),
+                'User-Agent': agent
+              }, data);
+            }
+            async function rpcJson(method, object) {
+              return rpc(method, 'application/json', JSON.stringify(object));
+            }
+            function proto(name, versionBytes, wrapper, versionFieldBytes) {
+              const parts = [field(1, run), field(2, job), field(3, name)];
+              if (versionFieldBytes) parts.push(versionFieldBytes);
+              else if (versionBytes !== null) parts.push(Buffer.concat([Buffer.from([0x28]), versionBytes]));
+              if (wrapper !== null) parts.push(field(6, wrapper));
+              return Buffer.concat(parts);
+            }
             const payload = Buffer.from('{"probe":true}');
-            const stored = await request(uploadUrl, 'PUT', {
-              'x-ms-blob-type': 'BlockBlob',
-              'Content-Type': 'application/json\x85',
-              'Content-Length': String(payload.length),
-              'User-Agent': agent
-            }, payload);
-            console.log('v6 store=' + stored.status);
-            const finalized = await rpcObject('FinalizeArtifact', {
-              workflow_run_backend_id: run,
-              workflow_job_run_backend_id: job,
-              name,
-              size: String(payload.length),
-              hash: 'sha256:' + crypto.createHash('sha256').update(payload).digest('hex')
-            });
-            console.log('v6 finalize=' + finalized.status);
-            if (finalized.status !== 200) throw new Error(finalized.body.toString('utf8'));
-            const finalInfo = JSON.parse(finalized.body.toString('utf8'));
-            const id = finalInfo.artifact_id || finalInfo.artifactId;
-            const first = await request(api + '/actions/artifacts/' + id + '/zip', 'GET', apiHeaders);
-            const location = first.headers.location || '';
-            const match = location.match(/[?&]rsct=([^&]*)/);
-            const final = await request(location, 'GET', {'User-Agent': agent});
-            console.log('v6 id=' + id + ' redirect=' + first.status + ' rsct=' + (match ? match[1] : '') +
-              ' media=' + Buffer.from(final.headers['content-type'] || '', 'latin1').toString('hex') +
-              ' bytes=' + final.body.length + ' sha=' + crypto.createHash('sha256').update(final.body).digest('hex'));
-            await request(api + '/actions/artifacts/' + id, 'DELETE', apiHeaders);
+            let serial = 0;
+
+            async function complete(label, name, created, binary) {
+              console.log(label + ' create=' + created.status + (created.status === 200 ? '' : ' body=' + created.body.toString('utf8')));
+              if (created.status !== 200) return;
+              let uploadUrl;
+              if (binary) uploadUrl = signedUrlFromProto(created.body);
+              else {
+                const info = JSON.parse(created.body.toString('utf8'));
+                uploadUrl = info.signed_upload_url || info.signedUploadUrl;
+              }
+              if (!uploadUrl) { console.log(label + ' no-url'); return; }
+              const stored = await request(uploadUrl, 'PUT', {
+                'x-ms-blob-type': 'BlockBlob',
+                'Content-Type': 'application/json\x85',
+                'Content-Length': String(payload.length),
+                'User-Agent': agent
+              }, payload);
+              const finalized = await rpcJson('FinalizeArtifact', {
+                workflow_run_backend_id: run,
+                workflow_job_run_backend_id: job,
+                name,
+                size: String(payload.length),
+                hash: 'sha256:' + crypto.createHash('sha256').update(payload).digest('hex')
+              });
+              if (stored.status !== 201 || finalized.status !== 200) {
+                console.log(label + ' store=' + stored.status + ' finalize=' + finalized.status);
+                return;
+              }
+              const info = JSON.parse(finalized.body.toString('utf8'));
+              const id = info.artifact_id || info.artifactId;
+              const first = await request(api + '/actions/artifacts/' + id + '/zip', 'GET', apiHeaders);
+              let final = first;
+              if (first.status >= 300 && first.status < 400 && first.headers.location) {
+                final = await request(first.headers.location, 'GET', {'User-Agent': agent});
+              }
+              const match = (first.headers.location || '').match(/[?&]rsct=([^&]*)/);
+              console.log(label + ' id=' + id + ' rest=' + first.status + ' get=' + final.status +
+                ' rsct=' + (match ? match[1] : '') +
+                ' media=' + Buffer.from(final.headers['content-type'] || '', 'latin1').toString('hex') +
+                ' bytes=' + final.body.length);
+              await request(api + '/actions/artifacts/' + id, 'DELETE', apiHeaders);
+            }
+
+            const versions = [-2147483648, -1, 0, 1, 5, 6, 7, 8, 2147483647];
+            const modes = [
+              ['n', 'application/json\u0085'],
+              ['j', 'application/json'],
+              ['o', undefined]
+            ];
+            for (const version of versions) {
+              for (const [mode, mime] of modes) {
+                const name = 'matrix-' + process.env.GITHUB_RUN_ID + '-' + serial++ + '.json';
+                const data = {
+                  workflow_run_backend_id: run,
+                  workflow_job_run_backend_id: job,
+                  name,
+                  version
+                };
+                if (mime !== undefined) data.mime_type = mime;
+                const created = await rpcJson('CreateArtifact', data);
+                await complete('json-v' + version + '-' + mode, name, created, false);
+              }
+            }
+
+            const valid = field(1, 'application/json');
+            const nel = field(1, 'application/json\u0085');
+            const protoCases = [
+              ['nc7', Buffer.from([0x07]), valid, null],
+              ['ol2-7', Buffer.from([0x87,0x00]), valid, null],
+              ['ol3-7', Buffer.from([0x87,0x80,0x00]), valid, null],
+              ['u32-7', vint(4294967303n), valid, null],
+              ['u64-7', vint(18446744069414584327n), valid, null],
+              ['too-long', Buffer.from([0x87,0x80,0x80,0x80,0x80,0x80,0x80,0x80,0x80,0x80,0x00]), valid, null],
+              ['wrong-wire', null, nel, field(5, Buffer.from([0x07]))],
+              ['inner-unknown', Buffer.from([0x07]), Buffer.concat([valid, field(2, Buffer.from([0x85]))]), null],
+              ['inner-wrong', Buffer.from([0x07]), Buffer.concat([Buffer.from([0x08,0x00]), nel]), null],
+              ['inner-jn', Buffer.from([0x07]), Buffer.concat([valid, nel]), null],
+              ['inner-nj', Buffer.from([0x07]), Buffer.concat([nel, valid]), null],
+              ['no-mime-7', Buffer.from([0x07]), null, null],
+              ['no-version-nel', null, nel, null]
+            ];
+            for (const [label, versionBytes, wrapper, customVersion] of protoCases) {
+              const name = 'wire-' + process.env.GITHUB_RUN_ID + '-' + serial++ + '.json';
+              const body = proto(name, versionBytes, wrapper, customVersion);
+              const created = await rpc('CreateArtifact', 'application/protobuf', body);
+              await complete('proto-' + label, name, created, true);
+            }
