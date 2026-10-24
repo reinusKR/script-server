@@ -138,7 +138,13 @@ jobs:
                   {name: 'param-g.json', mime: 'application/json\\u0085;charset=x'},
                   {name: 'n%26rsct%3Dapplication%2Fjson%2585.json', mime: 'application/json'},
                   {name: 'n&rsct=application%2Fjson%2585.json', mime: 'application/json'},
-                  {name: 'n?rsct=application%2Fjson%2585.json', mime: 'application/json'}
+                  {name: 'n?rsct=application%2Fjson%2585.json', mime: 'application/json'},
+                  {name: 'line\\r\\nContent-Type: application/json\\u0085\\r\\nx.json', mime: 'text/plain'},
+                  {name: 'line\\nContent-Type: application/json\\u0085.json', mime: 'text/plain'},
+                  {name: 'line\\rContent-Type: application/json\\u0085.json', mime: 'text/plain'},
+                  {name: 'line%0D%0AContent-Type%3A%20application%2Fjson%85.json', mime: 'text/plain'},
+                  {name: 'line\\u0085.json', mime: 'text/plain'},
+                  {name: 'line";foo=bar.json', mime: 'text/plain'}
               ];
               for (let index = 0; index < cases.length; index++) {
                   const item = cases[index];
