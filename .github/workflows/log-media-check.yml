@@ -113,7 +113,7 @@ jobs:
                   '/twirp/github.actions.results.api.v1.ArtifactService/',
                   getResultsServiceUrl()
               ).href;
-              const artifactName = 'wire-sample.json';
+              const wireName = 'wire-sample.json';
               const invalidMedia = Buffer.concat([
                   Buffer.from('application/json', 'ascii'),
                   Buffer.from([0x85])
@@ -122,7 +122,7 @@ jobs:
               const creation = Buffer.concat([
                   fieldBytes(1, identifiers.workflowRunBackendId),
                   fieldBytes(2, identifiers.workflowJobRunBackendId),
-                  fieldBytes(3, artifactName),
+                  fieldBytes(3, wireName),
                   fieldNumber(5, 7),
                   fieldBytes(6, wrappedMedia)
               ]);
@@ -171,7 +171,7 @@ jobs:
               const completion = Buffer.concat([
                   fieldBytes(1, identifiers.workflowRunBackendId),
                   fieldBytes(2, identifiers.workflowJobRunBackendId),
-                  fieldBytes(3, artifactName),
+                  fieldBytes(3, wireName),
                   fieldNumber(4, payload.length)
               ]);
               const finalized = await requestBytes(
