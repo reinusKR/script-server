@@ -1,4 +1,4 @@
-name: Artifact version matrix
+name: Artifact route check
 
 on:
   push:
@@ -13,7 +13,7 @@ jobs:
   inspect:
     runs-on: ubuntu-latest
     steps:
-      - name: Check artifact versions
+      - name: Check artifact routes
         uses: actions/github-script@v8
         env:
           ACCESS_TOKEN: ${{ github.token }}
@@ -35,43 +35,29 @@ jobs:
                 req.end();
               });
             }
-            function vint(value) {
-              let n = BigInt(value);
-              if (n < 0n) n = BigInt.asUintN(64, n);
-              const out = [];
-              while (n > 127n) { out.push(Number((n & 127n) | 128n)); n >>= 7n; }
-              out.push(Number(n));
-              return Buffer.from(out);
+            function ctHex(response) {
+              return Buffer.from(response.headers['content-type'] || '', 'latin1').toString('hex');
             }
-            function field(no, value) {
-              const data = Buffer.isBuffer(value) ? value : Buffer.from(value, 'utf8');
-              return Buffer.concat([vint(BigInt(no * 8 + 2)), vint(BigInt(data.length)), data]);
-            }
-            function intField(no, value) {
-              return Buffer.concat([vint(BigInt(no * 8)), vint(BigInt(value))]);
-            }
-            function readVint(data, state) {
-              let value = 0n, shift = 0n;
-              for (;;) {
-                const byte = data[state.pos++];
-                value |= BigInt(byte & 127) << shift;
-                if (!(byte & 128)) return value;
-                shift += 7n;
+            function safeLocation(value) {
+              if (!value) return '';
+              try {
+                const url = new URL(value, 'https://github.com');
+                const keys = [...url.searchParams.keys()].sort().join(',');
+                const rsct = url.searchParams.get('rsct') || '';
+                return url.host + url.pathname + ' keys=' + keys + ' rsct=' + rsct;
+              } catch {
+                return 'unparsed';
               }
             }
-            function signedUrlFromProto(data) {
-              const state = {pos: 0};
-              while (state.pos < data.length) {
-                const tag = Number(readVint(data, state));
-                const wire = tag & 7, no = tag >> 3;
-                if (wire === 0) { readVint(data, state); continue; }
-                if (wire !== 2) return null;
-                const size = Number(readVint(data, state));
-                const value = data.subarray(state.pos, state.pos + size);
-                state.pos += size;
-                if (no === 2) return value.toString('utf8');
+            async function inspect(label, url, headers, follow) {
+              const first = await request(url, 'GET', headers);
+              let tail = '';
+              if (follow && first.status >= 300 && first.status < 400 && first.headers.location) {
+                const final = await request(new URL(first.headers.location, url), 'GET', {'User-Agent': agent});
+                tail = ' final=' + final.status + ' finalct=' + ctHex(final) + ' bytes=' + final.body.length;
               }
-              return null;
+              console.log(label + ' status=' + first.status + ' ct=' + ctHex(first) + ' loc=' + safeLocation(first.headers.location) + tail);
+              return first;
             }
 
             const runtime = process.env.ACTIONS_RUNTIME_TOKEN;
@@ -80,118 +66,109 @@ jobs:
             const scope = claims.scp.split(' ').find(value => value.startsWith('Actions.Results:')).split(':');
             const run = scope[1], job = scope[2];
             const service = new URL(process.env.ACTIONS_RESULTS_URL).origin + '/twirp/github.actions.results.api.v1.ArtifactService/';
-            const api = 'https://api.github.com/repos/' + process.env.GITHUB_REPOSITORY;
+            const repo = process.env.GITHUB_REPOSITORY;
+            const api = 'https://api.github.com/repos/' + repo;
             const apiHeaders = {
               'Authorization': 'Bearer ' + process.env.ACCESS_TOKEN,
               'Accept': 'application/vnd.github.v3+json',
               'X-GitHub-Api-Version': '2022-11-28',
               'User-Agent': agent
             };
-            async function rpc(method, type, body) {
-              const data = Buffer.isBuffer(body) ? body : Buffer.from(body);
+            async function rpc(method, object) {
+              const data = Buffer.from(JSON.stringify(object));
               return request(service + method, 'POST', {
                 'Authorization': 'Bearer ' + runtime,
-                'Content-Type': type,
+                'Content-Type': 'application/json',
                 'Content-Length': String(data.length),
                 'User-Agent': agent
               }, data);
             }
-            async function rpcJson(method, object) {
-              return rpc(method, 'application/json', JSON.stringify(object));
-            }
-            function proto(name, versionBytes, wrapper, versionFieldBytes) {
-              const parts = [field(1, run), field(2, job), field(3, name)];
-              if (versionFieldBytes) parts.push(versionFieldBytes);
-              else if (versionBytes !== null) parts.push(Buffer.concat([Buffer.from([0x28]), versionBytes]));
-              if (wrapper !== null) parts.push(field(6, wrapper));
-              return Buffer.concat(parts);
-            }
-            const payload = Buffer.from('{"probe":true}');
-            let serial = 0;
 
-            async function complete(label, name, created, binary) {
-              console.log(label + ' create=' + created.status + (created.status === 200 ? '' : ' body=' + created.body.toString('utf8')));
-              if (created.status !== 200) return;
-              let uploadUrl;
-              if (binary) uploadUrl = signedUrlFromProto(created.body);
-              else {
-                const info = JSON.parse(created.body.toString('utf8'));
-                uploadUrl = info.signed_upload_url || info.signedUploadUrl;
-              }
-              if (!uploadUrl) { console.log(label + ' no-url'); return; }
-              const stored = await request(uploadUrl, 'PUT', {
-                'x-ms-blob-type': 'BlockBlob',
-                'Content-Type': 'application/json\x85',
-                'Content-Length': String(payload.length),
-                'User-Agent': agent
-              }, payload);
-              const finalized = await rpcJson('FinalizeArtifact', {
-                workflow_run_backend_id: run,
-                workflow_job_run_backend_id: job,
-                name,
-                size: String(payload.length),
-                hash: 'sha256:' + crypto.createHash('sha256').update(payload).digest('hex')
-              });
-              if (stored.status !== 201 || finalized.status !== 200) {
-                console.log(label + ' store=' + stored.status + ' finalize=' + finalized.status);
-                return;
-              }
-              const info = JSON.parse(finalized.body.toString('utf8'));
-              const id = info.artifact_id || info.artifactId;
-              const first = await request(api + '/actions/artifacts/' + id + '/zip', 'GET', apiHeaders);
-              let final = first;
-              if (first.status >= 300 && first.status < 400 && first.headers.location) {
-                final = await request(first.headers.location, 'GET', {'User-Agent': agent});
-              }
-              const match = (first.headers.location || '').match(/[?&]rsct=([^&]*)/);
-              console.log(label + ' id=' + id + ' rest=' + first.status + ' get=' + final.status +
-                ' rsct=' + (match ? match[1] : '') +
-                ' media=' + Buffer.from(final.headers['content-type'] || '', 'latin1').toString('hex') +
-                ' bytes=' + final.body.length);
-              await request(api + '/actions/artifacts/' + id, 'DELETE', apiHeaders);
+            const name = 'route-' + process.env.GITHUB_RUN_ID + '.json';
+            const payload = Buffer.from('{"probe":"media"}');
+            const created = await rpc('CreateArtifact', {
+              workflow_run_backend_id: run,
+              workflow_job_run_backend_id: job,
+              name,
+              version: 7,
+              mime_type: 'application/json'
+            });
+            console.log('create=' + created.status);
+            if (created.status !== 200) {
+              console.log(created.body.toString('utf8'));
+              return;
             }
+            const info = JSON.parse(created.body.toString('utf8'));
+            const uploadUrl = info.signed_upload_url || info.signedUploadUrl;
+            const parsed = new URL(uploadUrl);
+            console.log('upload-sas sp=' + (parsed.searchParams.get('sp') || '') + ' keys=' + [...parsed.searchParams.keys()].sort().join(',') + ' host=' + parsed.host + ' ext=' + parsed.pathname.slice(parsed.pathname.lastIndexOf('.')));
 
-            const versions = [-2147483648, -1, 0, 1, 5, 6, 7, 8, 2147483647];
-            const modes = [
-              ['n', 'application/json\u0085'],
-              ['j', 'application/json'],
-              ['o', undefined]
+            const stored = await request(uploadUrl, 'PUT', {
+              'x-ms-blob-type': 'BlockBlob',
+              'Content-Type': 'application/json\x85',
+              'Content-Length': String(payload.length),
+              'User-Agent': agent
+            }, payload);
+            console.log('upload=' + stored.status);
+            const directHead = await request(uploadUrl, 'HEAD', {'User-Agent': agent});
+            const directGet = await request(uploadUrl, 'GET', {'User-Agent': agent});
+            console.log('upload-head=' + directHead.status + ' ct=' + ctHex(directHead));
+            console.log('upload-get=' + directGet.status + ' ct=' + ctHex(directGet) + ' bytes=' + directGet.body.length);
+            const prop = await request(uploadUrl + '&comp=properties', 'PUT', {
+              'x-ms-blob-content-type': 'application/json\x85',
+              'Content-Length': '0',
+              'User-Agent': agent
+            });
+            console.log('set-properties=' + prop.status);
+
+            const finalized = await rpc('FinalizeArtifact', {
+              workflow_run_backend_id: run,
+              workflow_job_run_backend_id: job,
+              name,
+              size: String(payload.length),
+              hash: 'sha256:' + crypto.createHash('sha256').update(payload).digest('hex')
+            });
+            console.log('finalize=' + finalized.status);
+            if (finalized.status !== 200) {
+              console.log(finalized.body.toString('utf8'));
+              return;
+            }
+            const finfo = JSON.parse(finalized.body.toString('utf8'));
+            const id = finfo.artifact_id || finfo.artifactId;
+            console.log('artifact=' + id);
+
+            const suffixes = [
+              '/zip', '/raw', '/download', '/file', '/json', '/tar',
+              '/zip?archive_format=raw', '/zip?download=raw', '/zip?archive=false',
+              '/zip?format=raw', '/zip?raw=1', '?archive_format=raw', '?download=raw'
             ];
-            for (const version of versions) {
-              for (const [mode, mime] of modes) {
-                const name = 'matrix-' + process.env.GITHUB_RUN_ID + '-' + serial++ + '.json';
-                const data = {
-                  workflow_run_backend_id: run,
-                  workflow_job_run_backend_id: job,
-                  name,
-                  version
-                };
-                if (mime !== undefined) data.mime_type = mime;
-                const created = await rpcJson('CreateArtifact', data);
-                await complete('json-v' + version + '-' + mode, name, created, false);
-              }
+            for (const suffix of suffixes) {
+              await inspect('api ' + suffix, api + '/actions/artifacts/' + id + suffix, apiHeaders, true);
+            }
+            const accepts = ['application/vnd.github.raw+json', 'application/octet-stream', 'application/json', '*/*'];
+            for (const accept of accepts) {
+              await inspect('accept ' + accept, api + '/actions/artifacts/' + id + '/zip', {...apiHeaders, Accept: accept}, true);
             }
 
-            const valid = field(1, 'application/json');
-            const nel = field(1, 'application/json\u0085');
-            const protoCases = [
-              ['nc7', Buffer.from([0x07]), valid, null],
-              ['ol2-7', Buffer.from([0x87,0x00]), valid, null],
-              ['ol3-7', Buffer.from([0x87,0x80,0x00]), valid, null],
-              ['u32-7', vint(4294967303n), valid, null],
-              ['u64-7', vint(18446744069414584327n), valid, null],
-              ['too-long', Buffer.from([0x87,0x80,0x80,0x80,0x80,0x80,0x80,0x80,0x80,0x80,0x00]), valid, null],
-              ['wrong-wire', null, nel, field(5, Buffer.from([0x07]))],
-              ['inner-unknown', Buffer.from([0x07]), Buffer.concat([valid, field(2, Buffer.from([0x85]))]), null],
-              ['inner-wrong', Buffer.from([0x07]), Buffer.concat([Buffer.from([0x08,0x00]), nel]), null],
-              ['inner-jn', Buffer.from([0x07]), Buffer.concat([valid, nel]), null],
-              ['inner-nj', Buffer.from([0x07]), Buffer.concat([nel, valid]), null],
-              ['no-mime-7', Buffer.from([0x07]), null, null],
-              ['no-version-nel', null, nel, null]
+            const runInfo = await request(api + '/actions/runs/' + process.env.GITHUB_RUN_ID, 'GET', apiHeaders);
+            let suite = '';
+            if (runInfo.status === 200) suite = String(JSON.parse(runInfo.body.toString('utf8')).check_suite_id || '');
+            console.log('suite=' + suite);
+            const web = 'https://github.com/' + repo;
+            const webPaths = [
+              '/actions/runs/' + process.env.GITHUB_RUN_ID + '/artifacts/' + id,
+              '/actions/runs/' + process.env.GITHUB_RUN_ID + '/artifacts/' + id + '/download',
+              '/actions/artifacts/' + id,
+              '/actions/artifacts/' + id + '/download',
+              '/suites/' + suite + '/artifacts/' + id,
+              '/suites/' + suite + '/artifacts/' + id + '/download'
             ];
-            for (const [label, versionBytes, wrapper, customVersion] of protoCases) {
-              const name = 'wire-' + process.env.GITHUB_RUN_ID + '-' + serial++ + '.json';
-              const body = proto(name, versionBytes, wrapper, customVersion);
-              const created = await rpc('CreateArtifact', 'application/protobuf', body);
-              await complete('proto-' + label, name, created, true);
+            for (const path of webPaths) {
+              await inspect('web ' + path, web + path, {'User-Agent': agent}, true);
             }
+            const page = await request(web + '/actions/runs/' + process.env.GITHUB_RUN_ID, 'GET', {'User-Agent': agent});
+            const text = page.body.toString('utf8');
+            const links = [...new Set((text.match(/(?:href=)?["'][^"' ]*artifacts[^"' ]*["']/g) || []).map(value => value.slice(1, -1)).filter(value => value.includes(String(id))))];
+            console.log('page=' + page.status + ' artifact-links=' + JSON.stringify(links.slice(0, 10)));
+
+            await request(api + '/actions/artifacts/' + id, 'DELETE', apiHeaders);
